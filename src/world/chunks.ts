@@ -23,15 +23,86 @@ export interface Feature {
   amplitude: number;
 }
 
+/*
+ * Placements for everything that is not terrain: collectibles, hazards, rails.
+ *
+ * These are *specs*, carrying no y coordinate. Resolving them into world positions needs
+ * ground height, but `Terrain` owns this module — so the spec/resolve split keeps the
+ * dependency one-way, with `world.ts` doing the resolution. It also keeps a single
+ * deterministic generation point: features and spawns come out of the same per-chunk
+ * stream, so there is one place that has to be right about determinism rather than four.
+ */
+
+/**
+ * A chime arc.
+ *
+ * There is deliberately no height parameter. An arc traces exactly one full-height jump,
+ * so "jump here and hold" is always the right answer — vary the apex and some arcs ask for
+ * a jump higher than the player can physically make, while others sit below the arc a held
+ * jump actually flies. Either way the arc stops being a line you can follow, which is the
+ * only reason it exists. Variety comes from the terrain underneath.
+ */
+export interface ChimeArcSpec {
+  kind: 'chimeArc';
+  /** Stable within a chunk, so collected state survives eviction. */
+  slot: number;
+  /** World x where the arc begins. */
+  x: number;
+  count: number;
+}
+
+export interface ObstacleSpec {
+  kind: 'obstacle';
+  slot: number;
+  x: number;
+  width: number;
+  height: number;
+  /** Selects the silhouette shape; interpretation belongs to the renderer. */
+  variant: number;
+}
+
+export interface RailSpec {
+  kind: 'rail';
+  slot: number;
+  x: number;
+  length: number;
+  /** How far above the ground the rail floats at its start. */
+  clearance: number;
+  /** Slope of the rail, dy/dx. */
+  tilt: number;
+}
+
+export type SpawnSpec = ChimeArcSpec | ObstacleSpec | RailSpec;
+
 export interface Chunk {
   index: number;
   features: Feature[];
+  spawns: SpawnSpec[];
 }
 
 export const CHUNK_WIDTH = 900;
 
 /** Widest a feature may be. Keeps `featuresNear` to a 3-chunk window. */
 const MAX_FEATURE_WIDTH = 460;
+
+/**
+ * Furthest a spawn can reach beyond its anchor x. Chime arcs are the long ones, so
+ * queries must look this far either side to avoid missing one that starts in a
+ * neighbouring chunk.
+ */
+export const MAX_SPAWN_REACH = 700;
+
+/**
+ * Clear ground after a ramp where no obstacle may stand.
+ *
+ * A ramp always launches the player (its trailing face guarantees it), so anything
+ * inside the landing zone would be a hazard they were airborne over and could not
+ * avoid. Fairness has to be built into generation; it cannot be recovered later.
+ */
+const RAMP_LANDING_CLEAR = 460;
+
+/** Minimum gap between obstacles, so a successful dodge is not instantly punished. */
+const OBSTACLE_SPACING = 260;
 
 /** Chunks before this are left flat so a run always opens calmly. */
 const CALM_CHUNKS = 1;
@@ -93,6 +164,22 @@ export class ChunkField {
     return this.scratch;
   }
 
+  /**
+   * Every spawn spec anchored near a range. Returns a fresh array; safe to retain.
+   *
+   * The window is widened by {@link MAX_SPAWN_REACH} because a chime arc anchored in
+   * the previous chunk can still extend into this one.
+   */
+  spawnsIn(fromX: number, toX: number): SpawnSpec[] {
+    const first = chunkIndexAt(fromX - MAX_SPAWN_REACH);
+    const last = chunkIndexAt(toX + MAX_SPAWN_REACH);
+    const found: SpawnSpec[] = [];
+    for (let index = first; index <= last; index++) {
+      for (const spawn of this.chunk(index).spawns) found.push(spawn);
+    }
+    return found;
+  }
+
   /** Every feature overlapping a range. Returns a fresh array; safe to retain. */
   featuresIn(fromX: number, toX: number): Feature[] {
     const first = chunkIndexAt(fromX - MAX_FEATURE_WIDTH);
@@ -122,7 +209,7 @@ export class ChunkField {
 
   private generate(index: number): Chunk {
     const features: Feature[] = [];
-    if (index < CALM_CHUNKS) return { index, features };
+    if (index < CALM_CHUNKS) return { index, features, spawns: [] };
 
     // Keyed by index alone — this is what makes regeneration reproducible.
     const rng = this.rng.fork(`chunk:${index}`);
@@ -153,6 +240,76 @@ export class ChunkField {
       });
     }
 
-    return { index, features };
+    return { index, features, spawns: this.generateSpawns(start, features, rng) };
+  }
+
+  /**
+   * Places collectibles, hazards and rails.
+   *
+   * Runs after features and reads them, because placement is *about* the terrain: chime
+   * arcs want to start where a launch happens, and obstacles must stay out of where a
+   * launch lands. Drawing from the same chunk stream keeps the whole chunk reproducible.
+   */
+  private generateSpawns(start: number, features: readonly Feature[], rng: Rng): SpawnSpec[] {
+    const spawns: SpawnSpec[] = [];
+    let slot = 0;
+
+    // Ground that a launch will carry the player over. Nothing hazardous may go here.
+    const launchZones: Array<{ from: number; to: number }> = [];
+    for (const feature of features) {
+      if (feature.kind !== 'ramp' && feature.kind !== 'crest') continue;
+      const trailingEdge = feature.x + feature.width / 2;
+      launchZones.push({ from: feature.x, to: trailingEdge + RAMP_LANDING_CLEAR });
+    }
+    const inLaunchZone = (x: number): boolean =>
+      launchZones.some((zone) => x > zone.from && x < zone.to);
+
+    // Arc *hints*, spread across the chunk. Only a hint: `arcLaunch` picks the real launch
+    // point at resolution time, since it is the only place that can see the terrain — and it
+    // rejects most candidates as unjumpable. Offering several is what keeps chimes at a
+    // reasonable density despite that.
+    const ARC_HINTS = 3;
+    for (let hint = 0; hint < ARC_HINTS; hint++) {
+      const slice = CHUNK_WIDTH / ARC_HINTS;
+      spawns.push({
+        kind: 'chimeArc',
+        slot: slot++,
+        x: start + hint * slice + rng.range(0, slice * 0.5),
+        count: rng.int(4, 8),
+      });
+    }
+
+    // At most one per chunk. Contact is fatal and the only recourse is a jump, so roughly
+    // one hazard every 900–1800px is already a decision every few seconds — and Milestone 4's
+    // twists will be adding pressure on top of this, not instead of it.
+    const obstacleCount = rng.int(0, 2);
+    const placed: number[] = [];
+    for (let attempt = 0; attempt < obstacleCount * 4 && placed.length < obstacleCount; attempt++) {
+      const x = rng.range(start + 60, start + CHUNK_WIDTH - 60);
+      if (inLaunchZone(x)) continue;
+      if (placed.some((other) => Math.abs(other - x) < OBSTACLE_SPACING)) continue;
+      placed.push(x);
+      spawns.push({
+        kind: 'obstacle',
+        slot: slot++,
+        x,
+        width: rng.range(16, 30),
+        height: rng.range(34, 64),
+        variant: rng.int(0, 3),
+      });
+    }
+
+    if (rng.bool(0.4)) {
+      spawns.push({
+        kind: 'rail',
+        slot: slot++,
+        x: rng.range(start + 100, start + CHUNK_WIDTH - 340),
+        length: rng.range(180, 300),
+        clearance: rng.range(46, 92),
+        tilt: rng.range(-0.12, 0.12),
+      });
+    }
+
+    return spawns;
   }
 }

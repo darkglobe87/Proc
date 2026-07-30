@@ -24,8 +24,12 @@ import { SceneBuilder } from '../render/scene';
 import { SilhouetteStyle } from '../render/styles/silhouette';
 import { ANCHOR_X } from './camera';
 import { Camera } from './camera';
-import { Terrain } from '../world/terrain';
+import { World } from '../world/world';
+import { CHIME_RADIUS } from '../world/chimes';
+import { distanceToObstacle } from '../world/obstacles';
+import { railYAt } from '../world/rails';
 import { Player, PLAYER_RADIUS } from '../player/player';
+import { Flow } from './flow';
 import { drawHud } from '../ui/hud';
 import type { GameEvents } from './events';
 
@@ -70,6 +74,8 @@ export interface GameOptions {
   seed: number;
   isDaily: boolean;
   showDiagnostics: boolean;
+  /** Development aid: hide all hazards so the world can be inspected without dodging. */
+  noHazards?: boolean;
 }
 
 export class Game {
@@ -81,15 +87,23 @@ export class Game {
   private readonly style = new SilhouetteStyle();
   private readonly renderer: Renderer;
   private readonly camera = new Camera();
-  private readonly terrain: Terrain;
+  private readonly world: World;
   private readonly player: Player;
+  private readonly flow = new Flow();
 
   private state: GameState = 'ready';
   private time = 0;
   private deathAt = -Infinity;
   private best: number;
+  private bestChimes: number;
+  private bestFlow: number;
   private currentFlips = 0;
+  private chimes = 0;
+  private score = 0;
   private paused = false;
+
+  /** Obstacles already credited as a near-miss, so one cannot be scored repeatedly. */
+  private readonly nearMissed = new Set<number>();
 
   private readonly trail: number[] = [];
   private overBudgetSeconds = 0;
@@ -99,11 +113,13 @@ export class Game {
     private readonly options: GameOptions,
   ) {
     const rng = new Rng(options.seed);
-    this.terrain = new Terrain(rng, 0);
-    this.player = new Player(this.terrain);
+    this.world = new World(rng);
+    this.player = new Player(this.world);
     this.renderer = new Renderer(viewport, this.style);
 
     this.best = storage.load<number>('best.distance', 0);
+    this.bestChimes = storage.load<number>('best.chimes', 0);
+    this.bestFlow = storage.load<number>('best.flow', 1);
 
     this.input.attach(viewport.canvas);
     this.camera.snap();
@@ -114,6 +130,12 @@ export class Game {
     this.bus.on('player:launch', () => {
       this.currentFlips = 0;
     });
+    // Flow reacts to what the player did, rather than the player knowing about scoring.
+    this.bus.on('player:land', ({ quality, flips }) => {
+      if (quality === 'clean') this.flow.cleanLanding(flips);
+      else if (quality === 'sloppy') this.flow.sloppyLanding();
+    });
+    this.bus.on('player:nearMiss', () => this.flow.nearMiss());
 
     this.loop = new GameLoop({
       update: (dt) => this.update(dt),
@@ -146,6 +168,10 @@ export class Game {
 
       case 'running':
         this.player.update(dt, input, this.bus);
+        this.collectChimes();
+        this.creditNearMisses();
+        if (this.player.isGrinding) this.flow.grinding(dt);
+        this.flow.update(dt);
         if (this.player.dead) this.endRun();
         break;
 
@@ -157,15 +183,62 @@ export class Game {
     }
 
     this.camera.follow(this.player.x, this.player.y, this.player.speedRatio, dt);
-    this.terrain.prune(this.player.x);
+    this.world.prune(this.player.x);
 
     this.input.endStep();
   }
 
+  /** Collection radius is generous: chimes reward taking the line, they do not test it. */
+  private collectChimes(): void {
+    const reach = CHIME_RADIUS + PLAYER_RADIUS;
+    for (const chime of this.world.chimesNear(this.player.x, reach * 3)) {
+      const dx = chime.x - this.player.x;
+      const dy = chime.y - (this.player.y - PLAYER_RADIUS);
+      if (dx * dx + dy * dy > reach * reach) continue;
+      if (!this.world.collect(chime)) continue;
+
+      this.chimes++;
+      const value = this.flow.valueOfChime();
+      this.score += value;
+      this.flow.chime();
+      this.bus.emit('chime:collect', {
+        pitch: chime.pitch,
+        index: chime.index,
+        total: chime.total,
+        value,
+      });
+    }
+  }
+
+  /**
+   * Credits a near-miss once the player is safely past a hazard.
+   *
+   * Scored on the way out, not on approach: crediting while still alongside would pay out
+   * for a pass that is about to become a collision.
+   */
+  private creditNearMisses(): void {
+    const bodyY = this.player.y - PLAYER_RADIUS;
+    for (const obstacle of this.world.obstaclesNear(this.player.x, 120)) {
+      if (this.nearMissed.has(obstacle.id)) continue;
+      // Already behind the player, and it was close.
+      if (obstacle.x > this.player.x - obstacle.width) continue;
+      const distance = distanceToObstacle(obstacle, this.player.x, bodyY);
+      if (distance > 34) continue;
+      this.nearMissed.add(obstacle.id);
+      this.bus.emit('player:nearMiss', { obstacle: obstacle.id, distance });
+    }
+  }
+
   private beginRun(): void {
     this.player.reset();
+    this.world.reset();
+    this.flow.reset();
+    this.nearMissed.clear();
     this.trail.length = 0;
     this.currentFlips = 0;
+    this.chimes = 0;
+    this.score = 0;
+    if (this.options.noHazards) this.world.suppressHazards(-Infinity, Infinity);
     this.camera.snap();
     this.state = 'running';
     this.bus.emit('run:start', { seed: this.options.seed });
@@ -174,11 +247,21 @@ export class Game {
   private endRun(): void {
     this.state = 'dead';
     this.deathAt = this.time;
+
     const isBest = this.player.distance > this.best;
     if (isBest) {
       this.best = this.player.distance;
       storage.save('best.distance', Math.floor(this.best));
     }
+    if (this.chimes > this.bestChimes) {
+      this.bestChimes = this.chimes;
+      storage.save('best.chimes', this.chimes);
+    }
+    if (this.flow.peakMultiplier > this.bestFlow) {
+      this.bestFlow = this.flow.peakMultiplier;
+      storage.save('best.flow', Number(this.bestFlow.toFixed(2)));
+    }
+
     this.bus.emit('run:end', { distance: this.player.distance, best: isBest });
   }
 
@@ -192,6 +275,9 @@ export class Game {
     this.builder.begin(this.camera, this.time);
 
     for (const band of BANDS) this.emitBand(band, width, height);
+    this.emitRails(width);
+    this.emitObstacles(width);
+    this.emitChimes(width);
     this.emitTrail(drawX, drawY);
     this.emitPlayer(drawX, drawY);
 
@@ -204,6 +290,12 @@ export class Game {
         isDaily: this.options.isDaily,
         state: this.state,
         flips: this.currentFlips,
+        chimes: this.chimes,
+        bestChimes: this.bestChimes,
+        score: this.score,
+        flow: this.flow.multiplier,
+        flowIdle: this.flow.idleFraction,
+        grinding: this.player.isGrinding,
         fps: this.loop.fps,
         frameMs: this.loop.frameMs,
         renderScale: this.viewport.renderScale,
@@ -237,7 +329,7 @@ export class Game {
     this.builder.polygon(band.role, band.layer);
     for (let x = left; x <= right; x += BAND_STEP) {
       const sampled =
-        this.terrain.heightAt(x * band.parallax + band.offset) * band.amplitude;
+        this.world.terrain.heightAt(x * band.parallax + band.offset) * band.amplitude;
       this.builder.point(x, sampled + band.lift + verticalHold);
     }
     // Close the fill well below the visible area so the band reads as solid ground.
@@ -252,6 +344,76 @@ export class Game {
    * so width and alpha can taper along it. A uniform polyline reads as a rigid stick
    * welded to the player; the taper is what makes it look like a ribbon left behind.
    */
+  /**
+   * Chimes, with a gentle breathing pulse so they read as alive rather than as UI.
+   * Animated from `scene.time`, never from frame count, so it looks the same at any
+   * refresh rate.
+   */
+  private emitChimes(width: number): void {
+    const { left, right } = this.worldBounds(width);
+    for (const chime of this.world.chimesNear(this.camera.x, (right - left) / 2 + 200)) {
+      if (chime.x < left || chime.x > right) continue;
+      // Phase offset by index so an arc shimmers along its length instead of blinking.
+      const pulse = 1 + Math.sin(this.time * 4 + chime.index * 0.7) * 0.12;
+      this.builder.disc('chime', 'entities', chime.x, chime.y, 6 * pulse, 0.95);
+    }
+  }
+
+  /**
+   * Obstacles as dark masses with a rim-lit edge.
+   *
+   * The rim is not decoration. A silhouette-black obstacle standing on silhouette-black
+   * ground is invisible, and an unreadable hazard is an unfair one — Alto's gets away with
+   * pure silhouette only because its obstacles break the horizon against the sky.
+   */
+  private emitObstacles(width: number): void {
+    const { left, right } = this.worldBounds(width);
+    for (const obstacle of this.world.obstaclesNear(this.camera.x, (right - left) / 2 + 200)) {
+      if (obstacle.x < left - 40 || obstacle.x > right + 40) continue;
+
+      const half = obstacle.width / 2;
+      const top = obstacle.y - obstacle.height;
+      // Slight taper, so a monolith reads as stone rather than as a rectangle.
+      const taper = half * 0.35;
+
+      this.builder.polygon('hazard', 'entities');
+      this.builder.point(obstacle.x - half, obstacle.y);
+      this.builder.point(obstacle.x - half + taper, top);
+      this.builder.point(obstacle.x + half - taper, top);
+      this.builder.point(obstacle.x + half, obstacle.y);
+      this.builder.end();
+
+      // Lit edge on the sun side (the sun sits to the right in the sky cache).
+      this.builder.polyline('accent', 'entities', 2, 0.8);
+      this.builder.point(obstacle.x + half - taper, top);
+      this.builder.point(obstacle.x + half, obstacle.y);
+      this.builder.end();
+    }
+  }
+
+  private emitRails(width: number): void {
+    const { left, right } = this.worldBounds(width);
+    for (const rail of this.world.railsNear(this.camera.x, (right - left) / 2 + 200)) {
+      if (rail.x2 < left || rail.x1 > right) continue;
+
+      // Supports first, so the rail line draws over them.
+      for (const t of [0.15, 0.85]) {
+        const x = rail.x1 + (rail.x2 - rail.x1) * t;
+        const y = railYAt(rail, x);
+        if (y === null) continue;
+        this.builder.polyline('hazard', 'entities', 3, 0.85);
+        this.builder.point(x, y);
+        this.builder.point(x, this.world.terrain.heightAt(x));
+        this.builder.end();
+      }
+
+      this.builder.polyline('accent', 'entities', 3, 0.9);
+      this.builder.point(rail.x1, rail.y1);
+      this.builder.point(rail.x2, rail.y2);
+      this.builder.end();
+    }
+  }
+
   private emitTrail(x: number, y: number): void {
     if (this.state === 'running') {
       this.trail.push(x, y);

@@ -16,6 +16,14 @@ export interface HudModel {
   isDaily: boolean;
   state: 'ready' | 'running' | 'dead';
   flips: number;
+  chimes: number;
+  bestChimes: number;
+  score: number;
+  /** Current multiplier, 1..MAX_FLOW. */
+  flow: number;
+  /** 0..1 through the idle grace period; 1 means it is about to bleed away. */
+  flowIdle: number;
+  grinding: boolean;
   /** Diagnostics, shown only when enabled. */
   fps: number;
   frameMs: number;
@@ -56,6 +64,36 @@ export function drawHud(
     'left',
     500,
   );
+
+  // Chimes and multiplier, centred at the top — the pair the player watches while chaining.
+  builder.text('chime', 'hud', width / 2, top, `◈ ${model.chimes}`, 20, 'center', 600);
+  if (model.score > 0) {
+    builder.text('textDim', 'hud', width / 2, top + 18, `${model.score}`, 13, 'center');
+  }
+
+  if (model.flow > 1.05) {
+    const y = top + 42;
+    builder.text('accent', 'hud', width / 2, y, `×${model.flow.toFixed(1)}`, 22, 'center', 700);
+
+    // Decay bar: drains as the idle grace runs out, so the player can see the chain
+    // slipping before it actually starts costing them.
+    const barWidth = 74;
+    const remaining = 1 - model.flowIdle;
+    builder.polyline('textDim', 'hud', 3, 0.3);
+    builder.point(width / 2 - barWidth / 2, y + 10);
+    builder.point(width / 2 + barWidth / 2, y + 10);
+    builder.end();
+    if (remaining > 0) {
+      builder.polyline('accent', 'hud', 3, 0.9);
+      builder.point(width / 2 - barWidth / 2, y + 10);
+      builder.point(width / 2 - barWidth / 2 + barWidth * remaining, y + 10);
+      builder.end();
+    }
+  }
+
+  if (model.grinding) {
+    builder.text('accent', 'hud', width / 2, height * 0.36, 'GRIND', 20, 'center', 700);
+  }
 
   if (model.showDiagnostics) {
     builder.text('textDim', 'hud', right, top, `${Math.round(model.fps)} fps`, 13, 'right');
@@ -123,12 +161,22 @@ export function drawHud(
   }
 
   if (model.state === 'dead') {
-    builder.text('text', 'hud', width / 2, height * 0.46, `${model.distanceMetres} m`, 44, 'center', 700);
+    builder.text('text', 'hud', width / 2, height * 0.42, `${model.distanceMetres} m`, 44, 'center', 700);
+    builder.text(
+      'chime',
+      'hud',
+      width / 2,
+      height * 0.42 + 26,
+      `◈ ${model.chimes}   ·   ${model.score} pts`,
+      15,
+      'center',
+      600,
+    );
     builder.text(
       'textDim',
       'hud',
       width / 2,
-      height * 0.46 + 26,
+      height * 0.42 + 50,
       model.distanceMetres >= model.bestMetres ? 'new best · tap to run again' : 'tap to run again',
       14,
       'center',

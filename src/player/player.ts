@@ -11,7 +11,16 @@
 
 import type { InputSnapshot } from '../core/input';
 import type { Terrain } from '../world/terrain';
+import type { World } from '../world/world';
 import { sweepToGround } from '../world/collision';
+import { hitsObstacle } from '../world/obstacles';
+import {
+  RAIL_ANGLE_TOLERANCE,
+  railAngle,
+  railCrossing,
+  railYAt,
+  type Rail,
+} from '../world/rails';
 import type { GameBus, LandingQuality } from '../game/events';
 
 const GRAVITY = 2100;
@@ -107,6 +116,37 @@ const BOOST_DECAY = 1.3;
 
 export const PLAYER_RADIUS = 9;
 
+/** Body circle used for hazard collision, offset up from the board's contact line. */
+const BODY_OFFSET = 8;
+const BODY_RADIUS = 11;
+/** How far ahead to look for hazards. A little beyond one step at maximum speed. */
+const HAZARD_REACH = 90;
+
+/**
+ * The jump model, exported so chime arcs can be generated from the *same* numbers the
+ * player obeys.
+ *
+ * Duplicating these to draw a "roughly right" arc would guarantee the arcs drift out of
+ * alignment with the physics the first time anything is retuned — and an arc that teaches
+ * a line you cannot actually fly is worse than no arc at all.
+ */
+export const JUMP_MODEL = {
+  gravity: GRAVITY,
+  jumpVelocity: JUMP_VELOCITY,
+  holdGravityScale: HOLD_GRAVITY_SCALE,
+  maxHoldSeconds: MAX_HOLD_SECONDS,
+  /** Speed ceiling, for content that must hold true however fast the player is going. */
+  maxSpeed: MAX_SPEED,
+} as const;
+
+/**
+ * Cruise speed at a given distance — deterministic, so content generation can predict
+ * how fast the player will be travelling without knowing how they have played.
+ */
+export function cruiseSpeedAt(distanceX: number): number {
+  return BASE_SPEED + Math.min(Math.max(0, distanceX) / SPEED_RAMP, MAX_SPEED_BONUS);
+}
+
 /** Wraps an angle to (-π, π]. */
 function normaliseAngle(angle: number): number {
   let a = angle;
@@ -158,10 +198,21 @@ export class Player {
   /** Distance travelled, in world pixels. */
   distance = 0;
 
-  constructor(private readonly terrain: Terrain) {
-    this.y = terrain.heightAt(0);
+  /** The rail being ground, or null. Grinding is a third movement state. */
+  private rail: Rail | null = null;
+
+  constructor(private readonly world: World) {
+    this.y = this.terrain.heightAt(0);
     this.previousY = this.y;
-    this.rotation = terrain.angleAt(0);
+    this.rotation = this.terrain.angleAt(0);
+  }
+
+  private get terrain(): Terrain {
+    return this.world.terrain;
+  }
+
+  get isGrinding(): boolean {
+    return this.rail !== null;
   }
 
   /** 0..1 fraction of top speed, for camera look-ahead and effects. */
@@ -189,6 +240,7 @@ export class Player {
     this.flipsThisFlight = 0;
     this.boost = 0;
     this.distance = 0;
+    this.rail = null;
   }
 
   update(dt: number, input: Readonly<InputSnapshot>, bus: GameBus): void {
@@ -196,13 +248,34 @@ export class Player {
     this.previousY = this.y;
     if (this.dead) return;
 
-    if (this.grounded) {
+    if (this.rail) {
+      this.updateGrinding(dt, input, bus);
+    } else if (this.grounded) {
       this.updateGrounded(dt, input, bus);
     } else {
       this.updateAirborne(dt, input, bus);
     }
 
+    this.checkHazards(bus);
     this.distance = Math.max(this.distance, this.x);
+  }
+
+  /**
+   * Hazard contact, checked after movement in every state.
+   *
+   * Deliberately a post-move point test rather than a swept one: obstacles are wider than
+   * a single step at cruise speed, and generation keeps them out of launch landing zones,
+   * so there is nothing narrow enough to tunnel through.
+   */
+  private checkHazards(bus: GameBus): void {
+    const bodyY = this.y - BODY_OFFSET;
+    for (const obstacle of this.world.obstaclesNear(this.x, HAZARD_REACH)) {
+      if (hitsObstacle(obstacle, this.x, bodyY, BODY_RADIUS)) {
+        this.dead = true;
+        bus.emit('player:crash', { x: this.x, y: this.y, reason: 'obstacle' });
+        return;
+      }
+    }
   }
 
   private updateGrounded(dt: number, input: Readonly<InputSnapshot>, bus: GameBus): void {
@@ -211,7 +284,7 @@ export class Player {
     // Target speed: a distance-based cruise, pushed around by the slope. Easing toward
     // a target rather than integrating acceleration keeps speed bounded no matter what
     // terrain (or twist) does — no runaway, no need for a special case.
-    const cruise = BASE_SPEED + Math.min(this.distance / SPEED_RAMP, MAX_SPEED_BONUS);
+    const cruise = cruiseSpeedAt(this.distance);
     const target = cruise * (1 + clamp(slope, -1.2, 1.2) * SLOPE_INFLUENCE) + this.boost;
     this.vx += (target - this.vx) * Math.min(1, SPEED_EASE * dt);
     this.vx = clamp(this.vx, MIN_SPEED, MAX_SPEED);
@@ -300,6 +373,17 @@ export class Player {
     const nextX = this.x + this.vx * dt;
     const nextY = this.y + this.vy * dt;
 
+    // Rails float above the terrain, so a rail crossing always precedes ground contact and
+    // is checked first.
+    for (const rail of this.world.railsNear(this.x, HAZARD_REACH)) {
+      const crossing = railCrossing(rail, this.x, this.y, nextX, nextY);
+      if (!crossing) continue;
+      this.x = crossing.x;
+      this.y = crossing.y;
+      this.mountRail(rail, bus);
+      return;
+    }
+
     const contact = sweepToGround(this.terrain, this.x, this.y, nextX, nextY);
     if (!contact) {
       this.x = nextX;
@@ -310,6 +394,70 @@ export class Player {
     this.x = contact.x;
     this.y = contact.y;
     this.land(contact.slope, bus);
+  }
+
+  /**
+   * Attempts to start a grind. A rail met at the wrong angle is an ordinary crash — the
+   * same rule as ground landings, so there is one consistent thing to learn.
+   */
+  private mountRail(rail: Rail, bus: GameBus): void {
+    const angle = railAngle(rail);
+    if (Math.abs(normaliseAngle(this.rotation - angle)) > RAIL_ANGLE_TOLERANCE) {
+      this.dead = true;
+      bus.emit('player:crash', { x: this.x, y: this.y, reason: 'rail' });
+      return;
+    }
+
+    this.rail = rail;
+    this.grounded = false;
+    this.vy = 0;
+    this.spin = 0;
+    this.flipsThisFlight = 0;
+    this.rotation = angle;
+    bus.emit('player:grind', { rail: rail.id, started: true });
+  }
+
+  private updateGrinding(dt: number, input: Readonly<InputSnapshot>, bus: GameBus): void {
+    const rail = this.rail;
+    if (!rail) return;
+
+    const angle = railAngle(rail);
+    this.rotation = angle;
+
+    // A grind holds speed slightly above cruise. That is the whole appeal: a fast, safe
+    // line that also builds flow — worth aiming for, without being mandatory.
+    const target = cruiseSpeedAt(this.distance) * 1.05 + this.boost;
+    this.vx += (target - this.vx) * Math.min(1, SPEED_EASE * dt);
+    this.vx = clamp(this.vx, MIN_SPEED, MAX_SPEED);
+    this.boost -= this.boost * Math.min(1, BOOST_DECAY * dt);
+
+    if (input.jumpPressed) {
+      this.vy = JUMP_VELOCITY;
+      this.dismountRail(bus);
+      this.updateAirborne(dt, input, bus);
+      return;
+    }
+
+    this.x += this.vx * dt;
+    const y = railYAt(rail, this.x);
+    if (y === null) {
+      // Ran off the end — depart along the rail's direction.
+      this.vy = this.vx * Math.tan(angle);
+      this.dismountRail(bus);
+      return;
+    }
+    this.y = y;
+  }
+
+  private dismountRail(bus: GameBus): void {
+    const rail = this.rail;
+    this.rail = null;
+    this.grounded = false;
+    this.airtime = 0;
+    this.spin = 0;
+    this.flipsThisFlight = 0;
+    if (rail) bus.emit('player:grind', { rail: rail.id, started: false });
+    bus.emit('player:launch', { x: this.x, y: this.y, jumped: false });
   }
 
   private land(slope: number, bus: GameBus): void {

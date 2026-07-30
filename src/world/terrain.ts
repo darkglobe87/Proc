@@ -16,7 +16,7 @@
  */
 
 import type { Rng } from '../core/rng';
-import { ChunkField, type Feature } from './chunks';
+import { ChunkField, type Feature, type SpawnSpec } from './chunks';
 
 /** One layer of the base dune curve. */
 interface Octave {
@@ -121,6 +121,22 @@ export class Terrain {
   /** Features overlapping a range, for spawning and for drawing feature-specific art. */
   featuresIn(fromX: number, toX: number): Feature[] {
     return this.chunks.featuresIn(fromX, toX);
+  }
+
+  /** Spawn specs anchored near a range, for `World` to resolve into entities. */
+  spawnsIn(fromX: number, toX: number): SpawnSpec[] {
+    return this.chunks.spawnsIn(fromX, toX);
+  }
+
+  /**
+   * The spawn specs *owned by* a chunk.
+   *
+   * Ownership is by generating chunk, not by position: an anchor may legitimately sit
+   * before its own chunk's start. Selecting by position instead means a spec that drifted
+   * backwards belongs to no chunk at all and is silently never resolved.
+   */
+  chunkSpawns(index: number): readonly SpawnSpec[] {
+    return this.chunks.chunk(index).spawns;
   }
 
   /** Discards chunk state far behind the player. Regeneration is identical. */

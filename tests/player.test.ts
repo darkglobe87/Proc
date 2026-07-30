@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { EventBus } from '../src/core/events';
 import type { InputSnapshot } from '../src/core/input';
 import { Rng } from '../src/core/rng';
-import { Terrain } from '../src/world/terrain';
+import type { Terrain } from '../src/world/terrain';
+import { World } from '../src/world/world';
 import { LANDING_TOLERANCE, Player, classifyLanding } from '../src/player/player';
 import type { GameEvents, LandingQuality } from '../src/game/events';
 
@@ -24,10 +25,10 @@ function makeInput(overrides: Partial<InputSnapshot> = {}): InputSnapshot {
 }
 
 function setup(seed = 1234) {
-  const terrain = new Terrain(new Rng(seed), 0);
-  const player = new Player(terrain);
+  const world = new World(new Rng(seed));
+  const player = new Player(world);
   const bus = new EventBus<GameEvents>();
-  return { terrain, player, bus };
+  return { world, terrain: world.terrain, player, bus };
 }
 
 /** Finds an x where the ground is close to flat and not curving. */
@@ -101,19 +102,43 @@ describe('Player', () => {
   });
 
   describe('difficulty', () => {
-    it('survives a long way on terrain alone, with no input', () => {
-      // Crashes should come from the player's own choices, not from the ground. A
-      // passive run still gets launched off crests, so this exercises the whole
-      // launch-and-land cycle; dying without touching the controls would mean the
-      // terrain generator or the landing tolerance is hostile.
+    it('never kills a passive player with terrain alone', () => {
+      // Hazards are suppressed so this measures only the ground, launches and landings.
+      // Dying here would mean the terrain generator or the landing tolerance is hostile —
+      // crashes must come from the player's choices, not from the scenery.
       for (const seed of [1, 2, 3, 5, 8, 13, 21]) {
-        const { player, bus } = setup(seed);
+        const { world, player, bus } = setup(seed);
+        world.suppressHazards(-Infinity, Infinity);
         for (let step = 0; step < 4_000 && !player.dead; step++) {
           player.update(DT, makeInput(), bus);
         }
         expect(player.distance, `seed ${seed} died at ${player.distance.toFixed(0)}px`)
           .toBeGreaterThan(5_000);
       }
+    });
+
+    it('does kill a passive player once obstacles are in play', () => {
+      // The complement of the test above, and the reason obstacles exist: ignoring the
+      // controls should not be a viable strategy.
+      let deaths = 0;
+      for (const seed of [1, 2, 3, 5, 8, 13, 21]) {
+        const { player, bus } = setup(seed);
+        for (let step = 0; step < 4_000 && !player.dead; step++) {
+          player.update(DT, makeInput(), bus);
+        }
+        if (player.dead) deaths++;
+      }
+      expect(deaths).toBeGreaterThan(4);
+    });
+
+    it('suppression hides hazards from queries entirely', () => {
+      const { world } = setup(7);
+      const before = world.obstaclesNear(4_000, 4_000).length;
+      expect(before).toBeGreaterThan(0);
+      world.suppressHazards(-Infinity, Infinity);
+      expect(world.obstaclesNear(4_000, 4_000).length).toBe(0);
+      world.clearHazardSuppression();
+      expect(world.obstaclesNear(4_000, 4_000).length).toBe(before);
     });
   });
 
@@ -171,7 +196,10 @@ describe('Player', () => {
 
   describe('landing', () => {
     it('kills the player only on a crash', () => {
-      const { terrain, player, bus } = setup(31337);
+      const { world, terrain, player, bus } = setup(31337);
+      // Landing classification is what is under test; an obstacle at the chosen spot
+      // would be a different cause of death.
+      world.suppressHazards(-Infinity, Infinity);
       const flatX = findFlat(terrain, 1_500, 3_000);
       player.x = flatX;
       player.y = terrain.heightAt(flatX) - 40;
@@ -242,8 +270,10 @@ describe('Player', () => {
   describe('launching', () => {
     it('leaves the ground without a jump when fast over a crest', () => {
       // The curvature criterion: air should be earned by speed and line, not only by
-      // pressing the button.
-      const { player, bus } = setup(777);
+      // pressing the button. Hazards are suppressed because a passive player otherwise
+      // dies near the start and never builds the speed a natural launch requires.
+      const { world, player, bus } = setup(777);
+      world.suppressHazards(-Infinity, Infinity);
       let naturalLaunches = 0;
       bus.on('player:launch', ({ jumped }) => {
         if (!jumped) naturalLaunches++;

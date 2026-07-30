@@ -18,8 +18,17 @@ export interface GameEvents extends Record<string, unknown> {
   'player:land': { x: number; y: number; quality: LandingQuality; flips: number; airtime: number };
   /** A full rotation completed while airborne. */
   'player:trick': { flips: number };
+  /** Started or finished grinding a rail. */
+  'player:grind': { rail: number; started: boolean };
   /** Run-ending impact. */
-  'player:crash': { x: number; y: number; reason: 'landing' | 'obstacle' };
+  'player:crash': { x: number; y: number; reason: 'landing' | 'obstacle' | 'rail' };
+  /**
+   * A chime was taken. `pitch` is a scale degree rising along its arc — the hook the
+   * generative score consumes so that collecting is literally playing the music.
+   */
+  'chime:collect': { pitch: number; index: number; total: number; value: number };
+  /** Passed close to a hazard without touching it. */
+  'player:nearMiss': { obstacle: number; distance: number };
   /** Run lifecycle. */
   'run:start': { seed: number };
   'run:end': { distance: number; best: boolean };

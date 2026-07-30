@@ -7,11 +7,11 @@ wireframe. Ships as an Android APK, built entirely with free tooling.
 
 Full design: [`docs/DESIGN.md`](docs/DESIGN.md).
 
-> **Status: Milestone 2 of 9.** Playable: procedural dune terrain, momentum that
-> reads as physical, jumps, backflips, landing judgement, swept collision, and the
-> `Scene`/`RenderStyle` seam the later render-style twists depend on. Still to
-> come: collectibles and obstacles (M3), the twist system itself (M4), the four
-> alternate render styles (M5), and generative audio (M6).
+> **Status: Milestone 3 of 9.** Playable with something to chase: procedural dune
+> terrain, Alto-style momentum, jumps, backflips, landing judgement, chime arcs that
+> trace flyable jump trajectories, obstacles, grindable rails, and a flow multiplier.
+> Still to come: the twist system itself (M4), the four alternate render styles (M5),
+> and generative audio (M6).
 
 ## How it plays
 
@@ -27,6 +27,26 @@ terrain alone will never kill you.
 Holding the button jumps higher, and holding *past* that window commits to a
 backflip. Committing disables self-levelling — once you choose to rotate, the
 landing is yours to get right.
+
+**Chimes** are the collectible. They hang in arcs that trace a real jump
+trajectory, integrated from the same constants the player obeys, so following an
+arc *is* the correct line — the collectible teaches the terrain rather than
+decorating it. Each carries a rising scale degree, which is what the generative
+score will play in M6.
+
+**Rails** float above the dunes. Land on one at roughly its angle and you grind:
+speed held, flow building. Meet it at a bad angle and it is an ordinary crash.
+
+**Flow** is a multiplier from ×1 to ×8, fed by clean landings, flips, grind time,
+chimes and near-misses. It decays if you coast and halves on a sloppy landing.
+It multiplies chime value, never distance — chaining is a scoring choice, not a
+requirement, and breaking flow costs the multiplier rather than the run.
+
+**Obstacles** kill on contact, and their fairness is built into generation: never
+in a ramp's landing zone, never in the opening stretch, always spaced far enough
+apart that one dodge does not lead straight into another.
+
+Add `?nohazards` to the URL to explore the world without dodging.
 
 ## Controls
 
