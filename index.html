@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Mirage</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0b1026" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <style>
+      :root {
+        background: #0b1026;
+        color-scheme: dark;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0b1026;
+        /* Kill every browser gesture that would fight a one-touch game:
+           scroll-bounce, double-tap zoom, long-press selection, text callouts. */
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      /* Full-bleed: the canvas draws under notches and cutouts, and the HUD keeps
+         itself clear of them using the inset values exposed below. */
+      #stage {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      /* A zero-size probe whose padding JS can read to learn the safe-area insets,
+         since env() is not otherwise reachable from script. */
+      #safe-area-probe {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 0;
+        height: 0;
+        pointer-events: none;
+        visibility: hidden;
+        padding: env(safe-area-inset-top) env(safe-area-inset-right)
+          env(safe-area-inset-bottom) env(safe-area-inset-left);
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+    <div id="safe-area-probe"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

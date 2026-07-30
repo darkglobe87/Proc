@@ -1,0 +1,95 @@
+apply plugin: 'com.android.application'
+
+// Release signing material, resolved from whichever source is present:
+//   1. android/keystore.properties  — local builds (gitignored)
+//   2. MIRAGE_KEYSTORE_* env vars   — CI, fed from repository secrets
+// When neither exists the release build stays unsigned rather than failing, so
+// `assembleRelease` still works for anyone who just wants to check it compiles.
+def releaseSigning = [:]
+def keystorePropertiesFile = rootProject.file('keystore.properties')
+if (keystorePropertiesFile.exists()) {
+    def props = new Properties()
+    keystorePropertiesFile.withInputStream { props.load(it) }
+    releaseSigning = [
+        storeFile    : props['storeFile'],
+        storePassword: props['storePassword'],
+        keyAlias     : props['keyAlias'],
+        keyPassword  : props['keyPassword'],
+    ]
+} else if (System.getenv('MIRAGE_KEYSTORE_PATH')) {
+    releaseSigning = [
+        storeFile    : System.getenv('MIRAGE_KEYSTORE_PATH'),
+        storePassword: System.getenv('MIRAGE_KEYSTORE_PASSWORD'),
+        keyAlias     : System.getenv('MIRAGE_KEY_ALIAS'),
+        keyPassword  : System.getenv('MIRAGE_KEY_PASSWORD'),
+    ]
+}
+def hasReleaseSigning = releaseSigning.storeFile != null && file(releaseSigning.storeFile).exists()
+
+android {
+    namespace "com.darkglobe87.mirage"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.darkglobe87.mirage"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseSigning.storeFile)
+                storePassword releaseSigning.storePassword
+                keyAlias releaseSigning.keyAlias
+                keyPassword releaseSigning.keyPassword
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            } else {
+                logger.warn('MIRAGE: no keystore found — release APK will be unsigned and cannot be installed.')
+            }
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}
