@@ -87,8 +87,17 @@ export interface CameraView {
   y: number;
   /** 1 is neutral; below 1 pulls back and shows more world. */
   zoom: number;
-  /** Radians. Non-zero only under the Slow Rotate twist. */
+  /**
+   * Radians. Non-zero under Slow Rotate, and set to π by Inversion.
+   *
+   * Applied as a whole-frame post-process by the render style (see
+   * `renderer.ts`'s `applyScreenRotation`), never as part of the world-space camera
+   * transform — rotating world geometry directly breaks the moment any shape is
+   * drawn asymmetrically relative to the camera, which the terrain fill always is.
+   */
   rotation: number;
+  /** Horizontal mirror of world-space rendering. Set by the Mirror twist. */
+  mirrorX: boolean;
 }
 
 export interface Scene {
@@ -131,7 +140,7 @@ export class SceneBuilder {
   private used = 0;
   private current: Prim | null = null;
 
-  private readonly view: CameraView = { x: 0, y: 0, zoom: 1, rotation: 0 };
+  private readonly view: CameraView = { x: 0, y: 0, zoom: 1, rotation: 0, mirrorX: false };
   private elapsed = 0;
 
   /** Starts a frame, releasing the previous frame's primitives back to the pool. */
@@ -142,6 +151,7 @@ export class SceneBuilder {
     this.view.y = camera.y;
     this.view.zoom = camera.zoom;
     this.view.rotation = camera.rotation;
+    this.view.mirrorX = camera.mirrorX;
     this.elapsed = time;
   }
 

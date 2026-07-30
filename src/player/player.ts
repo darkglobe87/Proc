@@ -147,6 +147,29 @@ export function cruiseSpeedAt(distanceX: number): number {
   return BASE_SPEED + Math.min(Math.max(0, distanceX) / SPEED_RAMP, MAX_SPEED_BONUS);
 }
 
+/**
+ * The continuous knobs a twist may bend, owned here rather than by the twist system:
+ * Player is what interprets them, so it defines what "gravityScale" or "windAccel"
+ * actually mean. Twists import this shape rather than the other way around, which
+ * keeps the dependency direction the design commits to — twists know about the
+ * player, the player has no notion that twists exist, only that some numbers might
+ * arrive scaled or offset from neutral.
+ */
+export interface PhysicsModifiers {
+  /** Multiplies gravity's magnitude. Below 1 is floatier, above 1 is heavier. */
+  gravityScale: number;
+  /** Constant forward accel/decel, px/s². Negative is a headwind. */
+  windAccel: number;
+  /** Trick spin direction: 1 normal, -1 reversed. */
+  spinSign: number;
+}
+
+export const DEFAULT_MODIFIERS: Readonly<PhysicsModifiers> = {
+  gravityScale: 1,
+  windAccel: 0,
+  spinSign: 1,
+};
+
 /** Wraps an angle to (-π, π]. */
 function normaliseAngle(angle: number): number {
   let a = angle;
@@ -201,6 +224,13 @@ export class Player {
   /** The rail being ground, or null. Grinding is a third movement state. */
   private rail: Rail | null = null;
 
+  /**
+   * This step's modifiers, valid only for the duration of the current `update()` call.
+   * A field rather than a parameter threaded through every private method — `update()`
+   * is the only entry point, called once per fixed step, so there is no reentrancy risk.
+   */
+  private mods: Readonly<PhysicsModifiers> = DEFAULT_MODIFIERS;
+
   constructor(private readonly world: World) {
     this.y = this.terrain.heightAt(0);
     this.previousY = this.y;
@@ -243,10 +273,27 @@ export class Player {
     this.rail = null;
   }
 
-  update(dt: number, input: Readonly<InputSnapshot>, bus: GameBus): void {
+  update(
+    dt: number,
+    input: Readonly<InputSnapshot>,
+    bus: GameBus,
+    modifiers: Readonly<PhysicsModifiers> = DEFAULT_MODIFIERS,
+  ): void {
     this.previousX = this.x;
     this.previousY = this.y;
     if (this.dead) return;
+
+    this.mods = modifiers;
+
+    // Wind is applied once here, before branching into grounded/airborne/grinding, rather
+    // than inside each state. That single application point is deliberate: the ground
+    // state's own speed-easing (below) pulls vx back toward a wind-unaware cruise target
+    // every frame, so wind is naturally damped while grounded — friction-like resistance —
+    // and full-strength in the air, where nothing opposes it. Two different-feeling
+    // behaviours from one line, rather than two twist-aware code paths.
+    if (modifiers.windAccel !== 0) {
+      this.vx = clamp(this.vx + modifiers.windAccel * dt, MIN_SPEED, MAX_SPEED);
+    }
 
     if (this.rail) {
       this.updateGrinding(dt, input, bus);
@@ -326,7 +373,9 @@ export class Player {
   private shouldLaunch(): boolean {
     const curvature = this.terrain.curvatureAt(this.x);
     if (curvature <= 0) return false; // concave: ground is holding us in
-    return this.vx * this.vx * curvature > GRAVITY * LAUNCH_MARGIN;
+    // Reads the scaled gravity, so Moonwalk's softer pull also makes crests launch more
+    // readily — flight gets floatier everywhere at once, not just on a deliberate jump.
+    return this.vx * this.vx * curvature > GRAVITY * this.mods.gravityScale * LAUNCH_MARGIN;
   }
 
   private leaveGround(jumped: boolean, bus: GameBus): void {
@@ -346,18 +395,21 @@ export class Player {
 
     const floating =
       input.jumpHeld && this.vy < 0 && input.holdSeconds < MAX_HOLD_SECONDS;
-    this.vy += GRAVITY * (floating ? HOLD_GRAVITY_SCALE : 1) * dt;
+    this.vy += GRAVITY * this.mods.gravityScale * (floating ? HOLD_GRAVITY_SCALE : 1) * dt;
 
     // Rotation advances only after the hold outlasts SPIN_DELAY, so a high jump does
     // not become an accidental flip. Releasing freezes the body, which is how a landing
     // gets aimed.
     if (input.jumpHeld && input.holdSeconds > SPIN_DELAY) {
       const ramp = Math.min(1, (input.holdSeconds - SPIN_DELAY) / SPIN_RAMP);
-      const delta = TRICK_SPIN * ramp * dt;
+      const delta = TRICK_SPIN * ramp * dt * this.mods.spinSign;
       this.spin += delta;
       this.rotation += delta;
 
-      const flips = Math.floor(this.spin / (Math.PI * 2));
+      // Magnitude, not signed value: under Mirror, spin accumulates negatively, and a
+      // signed floor would count zero flips forever (flips would only ever go more
+      // negative, never exceeding the starting flipsThisFlight of 0).
+      const flips = Math.floor(Math.abs(this.spin) / (Math.PI * 2));
       if (flips > this.flipsThisFlight) {
         this.flipsThisFlight = flips;
         bus.emit('player:trick', { flips });

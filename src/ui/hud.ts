@@ -24,6 +24,10 @@ export interface HudModel {
   /** 0..1 through the idle grace period; 1 means it is about to bleed away. */
   flowIdle: number;
   grinding: boolean;
+  /** Currently active twist labels, shown persistently — a twist must be readable at a glance. */
+  activeTwists: readonly string[];
+  /** Non-empty only during the telegraph window ahead of a Shift landing. */
+  telegraphLabels: readonly string[];
   /** Diagnostics, shown only when enabled. */
   fps: number;
   frameMs: number;
@@ -65,6 +69,21 @@ export function drawHud(
     500,
   );
 
+  // Active twist(s), persistent for as long as they're in effect. The fairness contract
+  // requires every twist be readable from the screen alone — this is that label.
+  if (model.activeTwists.length > 0) {
+    builder.text(
+      'accent',
+      'hud',
+      left,
+      top + 58,
+      model.activeTwists.join(' + ').toUpperCase(),
+      13,
+      'left',
+      700,
+    );
+  }
+
   // Chimes and multiplier, centred at the top — the pair the player watches while chaining.
   builder.text('chime', 'hud', width / 2, top, `◈ ${model.chimes}`, 20, 'center', 600);
   if (model.score > 0) {
@@ -93,6 +112,20 @@ export function drawHud(
 
   if (model.grinding) {
     builder.text('accent', 'hud', width / 2, height * 0.36, 'GRIND', 20, 'center', 700);
+  }
+
+  // The telegraph banner: the one advance warning a Shift gives before it lands.
+  if (model.telegraphLabels.length > 0) {
+    builder.text(
+      'text',
+      'hud',
+      width / 2,
+      top + 78,
+      model.telegraphLabels.join(' + ').toUpperCase(),
+      18,
+      'center',
+      700,
+    );
   }
 
   if (model.showDiagnostics) {

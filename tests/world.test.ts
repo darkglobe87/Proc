@@ -166,6 +166,40 @@ describe('rails', () => {
   });
 });
 
+describe('hazard suppression', () => {
+  it('keys are independent: clearing one leaves another untouched', () => {
+    // Regression test for a real bug: the twist scheduler's grace-window teardown once
+    // called a single shared clearHazardSuppression() with no key, which wiped out an
+    // unrelated permanent suppression (the `?nohazards` dev flag) the moment the first
+    // Shift's grace window ended. Two independent keys must behave independently.
+    const world = new World(new Rng(3));
+    const before = world.obstaclesNear(4_000, 4_000).length;
+    expect(before).toBeGreaterThan(0);
+
+    world.suppressHazards('dev-nohazards', -Infinity, Infinity);
+    world.suppressHazards('twist-grace', 3_900, 4_100);
+    expect(world.obstaclesNear(4_000, 4_000).length).toBe(0);
+
+    // The grace key ends, as it does when a Shift's grace window expires — the
+    // permanent dev-flag suppression must still be in effect afterwards.
+    world.clearHazardSuppression('twist-grace');
+    expect(world.obstaclesNear(4_000, 4_000).length).toBe(0);
+
+    // Only once the *other* key is also cleared does suppression actually lift.
+    world.clearHazardSuppression('dev-nohazards');
+    expect(world.obstaclesNear(4_000, 4_000).length).toBe(before);
+  });
+
+  it('reset clears every key, not just one', () => {
+    const world = new World(new Rng(3));
+    const before = world.obstaclesNear(4_000, 4_000).length;
+    world.suppressHazards('a', -Infinity, Infinity);
+    world.suppressHazards('b', -Infinity, Infinity);
+    world.reset();
+    expect(world.obstaclesNear(4_000, 4_000).length).toBe(before);
+  });
+});
+
 describe('World caching', () => {
   it('bounds resident chunks across a long run', () => {
     const world = new World(new Rng(9));

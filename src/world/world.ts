@@ -44,32 +44,40 @@ export class World {
   }
 
   /**
-   * Range in which hazards are hidden, or null.
+   * Named ranges in which hazards are hidden.
    *
-   * This exists for the twist system's grace corridor: after a Shift the player needs a
-   * moment to read the new rule without dying to something they were not looking at. It
-   * lives here rather than in the twist code so obstacles never need to know twists exist.
+   * Keyed rather than a single slot, because two callers need suppression
+   * independently and neither should be able to clear the other's: the twist
+   * scheduler's grace corridor turns its own entry on at every Shift and off again
+   * ~1.2s later, while the `?nohazards` dev flag sets a permanent, run-long entry once.
+   * A single shared slot would have the grace window's teardown wipe out the dev
+   * flag's suppression the first time any Shift landed — which is exactly what
+   * happened before this was keyed. Lives here rather than in twist code so obstacles
+   * never need to know twists exist.
    */
-  private suppression: { from: number; to: number } | null = null;
+  private readonly suppressions = new Map<string, { from: number; to: number }>();
 
   /** Clears per-run state. Terrain and spawn specs are seed-derived and unaffected. */
   reset(): void {
     this.collected.clear();
-    this.suppression = null;
+    this.suppressions.clear();
   }
 
-  /** Hides hazards between two x positions. Only one range is active at a time. */
-  suppressHazards(fromX: number, toX: number): void {
-    this.suppression = { from: fromX, to: toX };
+  /** Hides hazards between two x positions, under `key`. Replaces that key's own range. */
+  suppressHazards(key: string, fromX: number, toX: number): void {
+    this.suppressions.set(key, { from: fromX, to: toX });
   }
 
-  clearHazardSuppression(): void {
-    this.suppression = null;
+  /** Clears only this key's suppression; other keys are unaffected. */
+  clearHazardSuppression(key: string): void {
+    this.suppressions.delete(key);
   }
 
   private isSuppressed(x: number): boolean {
-    const range = this.suppression;
-    return range !== null && x >= range.from && x <= range.to;
+    for (const range of this.suppressions.values()) {
+      if (x >= range.from && x <= range.to) return true;
+    }
+    return false;
   }
 
   get collectedCount(): number {

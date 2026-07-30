@@ -108,7 +108,7 @@ describe('Player', () => {
       // crashes must come from the player's choices, not from the scenery.
       for (const seed of [1, 2, 3, 5, 8, 13, 21]) {
         const { world, player, bus } = setup(seed);
-        world.suppressHazards(-Infinity, Infinity);
+        world.suppressHazards('test', -Infinity, Infinity);
         for (let step = 0; step < 4_000 && !player.dead; step++) {
           player.update(DT, makeInput(), bus);
         }
@@ -135,9 +135,9 @@ describe('Player', () => {
       const { world } = setup(7);
       const before = world.obstaclesNear(4_000, 4_000).length;
       expect(before).toBeGreaterThan(0);
-      world.suppressHazards(-Infinity, Infinity);
+      world.suppressHazards('test', -Infinity, Infinity);
       expect(world.obstaclesNear(4_000, 4_000).length).toBe(0);
-      world.clearHazardSuppression();
+      world.clearHazardSuppression('test');
       expect(world.obstaclesNear(4_000, 4_000).length).toBe(before);
     });
   });
@@ -199,7 +199,7 @@ describe('Player', () => {
       const { world, terrain, player, bus } = setup(31337);
       // Landing classification is what is under test; an obstacle at the chosen spot
       // would be a different cause of death.
-      world.suppressHazards(-Infinity, Infinity);
+      world.suppressHazards('test', -Infinity, Infinity);
       const flatX = findFlat(terrain, 1_500, 3_000);
       player.x = flatX;
       player.y = terrain.heightAt(flatX) - 40;
@@ -273,7 +273,7 @@ describe('Player', () => {
       // pressing the button. Hazards are suppressed because a passive player otherwise
       // dies near the start and never builds the speed a natural launch requires.
       const { world, player, bus } = setup(777);
-      world.suppressHazards(-Infinity, Infinity);
+      world.suppressHazards('test', -Infinity, Infinity);
       let naturalLaunches = 0;
       bus.on('player:launch', ({ jumped }) => {
         if (!jumped) naturalLaunches++;

@@ -7,11 +7,11 @@ wireframe. Ships as an Android APK, built entirely with free tooling.
 
 Full design: [`docs/DESIGN.md`](docs/DESIGN.md).
 
-> **Status: Milestone 3 of 9.** Playable with something to chase: procedural dune
-> terrain, Alto-style momentum, jumps, backflips, landing judgement, chime arcs that
-> trace flyable jump trajectories, obstacles, grindable rails, and a flow multiplier.
-> Still to come: the twist system itself (M4), the four alternate render styles (M5),
-> and generative audio (M6).
+> **Status: Milestone 4 of 9.** The centrepiece is in: every 35–45 seconds the world
+> Shifts, telegraphed 1.5 seconds ahead, with a grace window after so a new rule never
+> kills you before you've read it. Six twists so far — Inversion, Mirror, Moonwalk,
+> Wind, Metronome, Echo — stacking in pairs from the sixth Shift on. Still to come: the
+> four alternate render styles (M5) and generative audio (M6).
 
 ## How it plays
 
@@ -47,6 +47,30 @@ in a ramp's landing zone, never in the opening stretch, always spaced far enough
 apart that one dodge does not lead straight into another.
 
 Add `?nohazards` to the URL to explore the world without dodging.
+
+## Shifts
+
+Every 35–45 seconds (or a distance threshold, whichever comes first), the world
+**Shifts**: a 1.5-second telegraph names what's coming, then one rule of the game
+changes. A 1.2-second grace window keeps hazards hidden right after, so the first
+thing a new rule does is never kill you before you've had a chance to read it.
+
+The six twists so far:
+
+| Twist | What changes |
+| --- | --- |
+| **Inversion** | The whole screen rolls 180° — sky at the bottom, ground at the top. Every physics number underneath is unchanged; only what you see flips. |
+| **Mirror** | Rendering mirrors left-right, and a held trick spins the other way. |
+| **Moonwalk** | Gravity softens — floatier jumps, and crests launch you more readily. |
+| **Wind** | A constant push, one direction or the other, redrawn each time it's chosen. Bites hardest in the air. |
+| **Metronome** | Jumps fire on the beat. Land inside the window and you get a full variable-height jump as normal; miss it and the press is buffered to the next beat as a fixed-height hop. |
+| **Echo** | A ghost of you from 3 seconds ago retraces your line and picks up any chimes you missed. It cannot collide with or block you — only help. |
+
+From the sixth Shift onward, two twists activate together rather than one, filtered
+by a conflict matrix so incompatible pairs are never forced.
+
+Add `?fastshift` to the URL to compress Shift timing to a few seconds, for exploring
+the twist pool without waiting a full run out.
 
 ## Controls
 

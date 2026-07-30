@@ -61,7 +61,7 @@ function fractionFlown(seed: number, owned: OwnedArc): number | null {
   const { spec, chunkIndex } = owned;
   const world = new World(new Rng(seed));
   // Hazards would end the run before reaching the arc; this measures the arc alone.
-  world.suppressHazards(-Infinity, Infinity);
+  world.suppressHazards('test', -Infinity, Infinity);
   const player = new Player(world);
   const bus = new EventBus<GameEvents>();
 

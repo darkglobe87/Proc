@@ -29,6 +29,10 @@ export interface GameEvents extends Record<string, unknown> {
   'chime:collect': { pitch: number; index: number; total: number; value: number };
   /** Passed close to a hazard without touching it. */
   'player:nearMiss': { obstacle: number; distance: number };
+  /** A Shift is about to land — the telegraph window. `labels` name what's coming. */
+  'twist:telegraph': { labels: readonly string[] };
+  /** The telegraphed Shift has landed and is now the active set. */
+  'twist:shift': { ids: readonly string[]; shiftIndex: number };
   /** Run lifecycle. */
   'run:start': { seed: number };
   'run:end': { distance: number; best: boolean };

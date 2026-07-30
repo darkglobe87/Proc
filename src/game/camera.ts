@@ -23,11 +23,30 @@ const LOOK_AHEAD = 130;
 /** How far the player may drift from the anchor before y is pulled harder. */
 const Y_DEADZONE = 70;
 
+/**
+ * The continuous render knobs a twist may bend. Owned here, next to the camera fields
+ * they end up written onto, for the same reason `PhysicsModifiers` lives in player.ts:
+ * the consumer defines the shape, and twists import it — never the other way round.
+ */
+export interface RenderModifiers {
+  /** Camera roll, radians. */
+  rotation: number;
+  /** Horizontal mirror of world-space rendering. */
+  mirrorX: boolean;
+}
+
+export const DEFAULT_RENDER_MODIFIERS: Readonly<RenderModifiers> = {
+  rotation: 0,
+  mirrorX: false,
+};
+
 export class Camera implements CameraView {
   x = 0;
   y = 0;
   zoom = 1;
   rotation = 0;
+  /** Set each frame from the active twists' render fold; not owned by `follow()`. */
+  mirrorX = false;
 
   /** Set true after a teleport so the next update snaps instead of easing. */
   private snapNext = true;

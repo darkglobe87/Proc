@@ -6,7 +6,7 @@
  * four styles in Milestone 5 are reinterpreting.
  */
 
-import { applyCamera, type RenderStyle, type StyleContext } from '../renderer';
+import { applyCamera, applyScreenRotation, type RenderStyle, type StyleContext } from '../renderer';
 import { LAYER_ORDER, type LayerId, type Prim, type Scene } from '../scene';
 import { SkyCache } from '../sky';
 
@@ -25,6 +25,13 @@ export class SilhouetteStyle implements RenderStyle {
   draw(scene: Scene, { ctx, viewport, palette }: StyleContext): void {
     const { width, height } = viewport;
 
+    // Sky and world share one outer rotation (Inversion's whole-frame roll), so they
+    // move as a single rigid image with no seam between them — see
+    // applyScreenRotation for why this cannot be folded into the camera transform
+    // below instead.
+    ctx.save();
+    applyScreenRotation(ctx, scene.camera, width, height);
+
     this.sky.draw(ctx, width, height, palette);
 
     ctx.save();
@@ -34,7 +41,9 @@ export class SilhouetteStyle implements RenderStyle {
     }
     ctx.restore();
 
-    // HUD last, untransformed, so it neither scrolls nor scales.
+    ctx.restore();
+
+    // HUD last, outside both transforms, so it neither scrolls, scales, nor rotates.
     this.drawLayer(ctx, scene, 'hud', palette);
 
     ctx.globalAlpha = 1;

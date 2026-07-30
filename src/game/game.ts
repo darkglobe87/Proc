@@ -25,13 +25,15 @@ import { SilhouetteStyle } from '../render/styles/silhouette';
 import { ANCHOR_X } from './camera';
 import { Camera } from './camera';
 import { World } from '../world/world';
-import { CHIME_RADIUS } from '../world/chimes';
+import { CHIME_RADIUS, type Chime } from '../world/chimes';
 import { distanceToObstacle } from '../world/obstacles';
 import { railYAt } from '../world/rails';
 import { Player, PLAYER_RADIUS } from '../player/player';
 import { Flow } from './flow';
 import { drawHud } from '../ui/hud';
 import type { GameEvents } from './events';
+import { TELEGRAPH_SECONDS, TwistScheduler, type SchedulerHooks } from '../twists/scheduler';
+import { createTwistRegistry } from '../twists/registry';
 
 export type GameState = 'ready' | 'running' | 'dead';
 
@@ -76,6 +78,8 @@ export interface GameOptions {
   showDiagnostics: boolean;
   /** Development aid: hide all hazards so the world can be inspected without dodging. */
   noHazards?: boolean;
+  /** Development aid: compress Shift timing to a few seconds instead of 35–45s. */
+  fastShift?: boolean;
 }
 
 export class Game {
@@ -90,6 +94,9 @@ export class Game {
   private readonly world: World;
   private readonly player: Player;
   private readonly flow = new Flow();
+  private readonly twists: TwistScheduler;
+  /** Reused every frame rather than allocated — see SchedulerHooks. */
+  private readonly twistHooks: SchedulerHooks;
 
   private state: GameState = 'ready';
   private time = 0;
@@ -101,6 +108,10 @@ export class Game {
   private chimes = 0;
   private score = 0;
   private paused = false;
+
+  /** Telegraph banner state, driven by the 'twist:telegraph' event. */
+  private telegraphLabels: readonly string[] = [];
+  private telegraphTimer = 0;
 
   /** Obstacles already credited as a near-miss, so one cannot be scored repeatedly. */
   private readonly nearMissed = new Set<number>();
@@ -116,6 +127,21 @@ export class Game {
     this.world = new World(rng);
     this.player = new Player(this.world);
     this.renderer = new Renderer(viewport, this.style);
+
+    // Forking from the same top-level seed as World/Terrain, not consuming from them:
+    // fork() never advances the parent stream, so this is independent of how many
+    // chunks get generated and does not disturb their determinism either.
+    this.twists = new TwistScheduler(
+      rng.fork('twists'),
+      createTwistRegistry(rng),
+      options.fastShift ? { seconds: [3, 5], px: [200, 400] } : undefined,
+    );
+    this.twistHooks = {
+      world: this.world,
+      player: this.player,
+      bus: this.bus,
+      collectChime: (chime) => this.collectOne(chime),
+    };
 
     this.best = storage.load<number>('best.distance', 0);
     this.bestChimes = storage.load<number>('best.chimes', 0);
@@ -136,6 +162,10 @@ export class Game {
       else if (quality === 'sloppy') this.flow.sloppyLanding();
     });
     this.bus.on('player:nearMiss', () => this.flow.nearMiss());
+    this.bus.on('twist:telegraph', ({ labels }) => {
+      this.telegraphLabels = labels;
+      this.telegraphTimer = TELEGRAPH_SECONDS;
+    });
 
     this.loop = new GameLoop({
       update: (dt) => this.update(dt),
@@ -166,14 +196,26 @@ export class Game {
         if (input.jumpPressed) this.beginRun();
         break;
 
-      case 'running':
-        this.player.update(dt, input, this.bus);
+      case 'running': {
+        // Computed before the physics step, so a Shift's rules are what the player's
+        // own input and movement are actually evaluated against this frame.
+        const modifiers = this.twists.computePhysicsModifiers();
+        const effectiveInput = this.twists.transformInput(input, dt);
+        this.player.update(dt, effectiveInput, this.bus, modifiers);
+
         this.collectChimes();
         this.creditNearMisses();
         if (this.player.isGrinding) this.flow.grinding(dt);
         this.flow.update(dt);
+
+        // After the physics step: Echo records this frame's post-move position, and the
+        // telegraph/grace/pairing state machine advances.
+        this.twists.update(dt, this.twistHooks);
+        if (this.telegraphTimer > 0) this.telegraphTimer = Math.max(0, this.telegraphTimer - dt);
+
         if (this.player.dead) this.endRun();
         break;
+      }
 
       case 'dead':
         if (input.jumpPressed && this.time - this.deathAt > DEATH_COOLDOWN) {
@@ -194,20 +236,29 @@ export class Game {
     for (const chime of this.world.chimesNear(this.player.x, reach * 3)) {
       const dx = chime.x - this.player.x;
       const dy = chime.y - (this.player.y - PLAYER_RADIUS);
-      if (dx * dx + dy * dy > reach * reach) continue;
-      if (!this.world.collect(chime)) continue;
-
-      this.chimes++;
-      const value = this.flow.valueOfChime();
-      this.score += value;
-      this.flow.chime();
-      this.bus.emit('chime:collect', {
-        pitch: chime.pitch,
-        index: chime.index,
-        total: chime.total,
-        value,
-      });
+      if (dx * dx + dy * dy <= reach * reach) this.collectOne(chime);
     }
+  }
+
+  /**
+   * The real scoring path for a single pickup — count, score, flow, event. Exposed to
+   * twists via `SchedulerHooks.collectChime` so a twist that awards a chime on the
+   * player's behalf (Echo's ghost) cannot silently diverge from how a live pickup
+   * is scored; it goes through the exact same accounting.
+   */
+  private collectOne(chime: Chime): void {
+    if (!this.world.collect(chime)) return;
+
+    this.chimes++;
+    const value = this.flow.valueOfChime();
+    this.score += value;
+    this.flow.chime();
+    this.bus.emit('chime:collect', {
+      pitch: chime.pitch,
+      index: chime.index,
+      total: chime.total,
+      value,
+    });
   }
 
   /**
@@ -233,12 +284,22 @@ export class Game {
     this.player.reset();
     this.world.reset();
     this.flow.reset();
+    this.twists.reset();
     this.nearMissed.clear();
     this.trail.length = 0;
     this.currentFlips = 0;
     this.chimes = 0;
     this.score = 0;
-    if (this.options.noHazards) this.world.suppressHazards(-Infinity, Infinity);
+    this.telegraphLabels = [];
+    this.telegraphTimer = 0;
+    this.camera.rotation = 0;
+    this.camera.mirrorX = false;
+    // Applied after twists.reset() and world.reset(), so a dev-mode run always opens
+    // hazard-free regardless of what the previous run's twists left suppressed.
+    // A distinct key from the twist scheduler's own grace-window suppression (see
+    // World), so the two coexist independently — the grace window's teardown must
+    // never accidentally cancel this permanent, run-long dev override, or vice versa.
+    if (this.options.noHazards) this.world.suppressHazards('dev-nohazards', -Infinity, Infinity);
     this.camera.snap();
     this.state = 'running';
     this.bus.emit('run:start', { seed: this.options.seed });
@@ -272,6 +333,12 @@ export class Game {
     const drawX = this.player.previousX + (this.player.x - this.player.previousX) * alpha;
     const drawY = this.player.previousY + (this.player.y - this.player.previousY) * alpha;
 
+    // Applied to the camera every frame rather than by the twists directly: the camera
+    // has no notion that twists exist, only fields a render fold happens to write to.
+    const renderMods = this.twists.computeRenderModifiers();
+    this.camera.rotation = renderMods.rotation;
+    this.camera.mirrorX = renderMods.mirrorX;
+
     this.builder.begin(this.camera, this.time);
 
     for (const band of BANDS) this.emitBand(band, width, height);
@@ -280,6 +347,7 @@ export class Game {
     this.emitChimes(width);
     this.emitTrail(drawX, drawY);
     this.emitPlayer(drawX, drawY);
+    this.twists.emit(this.builder);
 
     drawHud(
       this.builder,
@@ -296,6 +364,8 @@ export class Game {
         flow: this.flow.multiplier,
         flowIdle: this.flow.idleFraction,
         grinding: this.player.isGrinding,
+        activeTwists: this.twists.activeLabels,
+        telegraphLabels: this.telegraphTimer > 0 ? this.telegraphLabels : [],
         fps: this.loop.fps,
         frameMs: this.loop.frameMs,
         renderScale: this.viewport.renderScale,
