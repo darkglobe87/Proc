@@ -1,0 +1,36 @@
+# dependencies
+node_modules/
+
+# web build output
+dist/
+
+# vite
+.vite/
+*.tsbuildinfo
+
+# android build output (the android/ project itself IS committed)
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/app/release/
+android/capacitor-cordova-android-plugins/
+
+# signing material — never commit these
+*.keystore
+*.jks
+keystore.properties
+
+# local android sdk, if installed inside the repo
+.android-sdk/
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# test + coverage
+coverage/
+test-results/
+playwright-report/
