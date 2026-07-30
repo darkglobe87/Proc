@@ -7,12 +7,26 @@ wireframe. Ships as an Android APK, built entirely with free tooling.
 
 Full design: [`docs/DESIGN.md`](docs/DESIGN.md).
 
-> **Status: Milestone 1 of 9.** The spine is in place — fixed-step loop,
-> deterministic seeding, touch input, DPR handling, persistence, and a working
-> signed APK. What runs today is a thin vertical slice (seeded dunes, a jumping
-> runner, parallax, HUD) that exists to prove the pipeline on a real device. The
-> twist system, generative audio and render-style morphing land in later
-> milestones.
+> **Status: Milestone 2 of 9.** Playable: procedural dune terrain, momentum that
+> reads as physical, jumps, backflips, landing judgement, swept collision, and the
+> `Scene`/`RenderStyle` seam the later render-style twists depend on. Still to
+> come: collectibles and obstacles (M3), the twist system itself (M4), the four
+> alternate render styles (M5), and generative audio (M6).
+
+## How it plays
+
+You run automatically. Downhill builds speed, uphill costs it, and running fast
+over a crest launches you without any input — air is earned by reading the ground,
+not just by pressing the button.
+
+Landings are judged on how closely your body angle matches the slope: within 35°
+is clean and pays a speed boost, up to 75° is sloppy and costs speed, beyond that
+you crash. While no trick is committed the board self-levels in the air, so the
+terrain alone will never kill you.
+
+Holding the button jumps higher, and holding *past* that window commits to a
+backflip. Committing disables self-levelling — once you choose to rotate, the
+landing is yours to get right.
 
 ## Controls
 
