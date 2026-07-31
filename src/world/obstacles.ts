@@ -2,8 +2,12 @@
  * Obstacles — the hazard.
  *
  * Ground-standing silhouettes that end a run on contact. Their fairness comes from
- * generation (`chunks.ts` keeps them out of ramp landing zones and spaces them apart),
- * so this module only has to resolve a spec onto the ground and answer collision.
+ * generation (`chunks.ts` keeps them out of ramp landing zones and spaces them apart)
+ * and from resolution here: `chunks.ts` has no access to the terrain (it only ever
+ * sees this chunk's own features, never the base dune curve or a neighbour's), so the
+ * slope at a candidate x can only be checked once `Terrain` is available — the same
+ * reason `chimes.ts`'s `arcLaunch` rejects candidates at resolve time rather than at
+ * generation time.
  */
 
 import type { Terrain } from './terrain';
@@ -20,11 +24,34 @@ export interface Obstacle {
   variant: number;
 }
 
+/**
+ * Slope beyond which ground counts as "uphill" for obstacle placement.
+ *
+ * Clearing an obstacle means outrunning your own jump arc, and running uphill eats
+ * into that margin on the far side — the rising ground meets the arc earlier than it
+ * would on flat or falling ground, so the same jump that clears an obstacle on flat
+ * ground can fall short on a rise. Sampling shows roughly a quarter of the terrain
+ * sits beyond this threshold, so it excludes the stretches where that effect is
+ * pronounced without making obstacles rare.
+ */
+export const UPHILL_SLOPE_LIMIT = 0.15;
+
+/**
+ * Resolves a spec onto the ground, or returns null to skip it entirely.
+ *
+ * A rejected obstacle is not retried at a different x: `chunks.ts` already spends a
+ * bounded number of attempts choosing candidates with no notion of slope, so some
+ * chunks simply end up with fewer obstacles than requested — quieter chunks are a
+ * fine outcome, an unfairly hard one is not.
+ */
 export function resolveObstacle(
   terrain: Terrain,
   spec: ObstacleSpec,
   chunkIndex: number,
-): Obstacle {
+): Obstacle | null {
+  // Negative slope is ground rising to the right — see Terrain.slopeAt.
+  if (terrain.slopeAt(spec.x) < -UPHILL_SLOPE_LIMIT) return null;
+
   return {
     id: chunkIndex * 100_000 + spec.slot * 100,
     x: spec.x,

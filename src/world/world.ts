@@ -177,9 +177,13 @@ export class World {
       case 'chimeArc':
         target.chimes.push(...buildArc(this.terrain, spec, index));
         break;
-      case 'obstacle':
-        target.obstacles.push(resolveObstacle(this.terrain, spec, index));
+      case 'obstacle': {
+        // Rejected on uphill ground — see resolveObstacle. Not every spec becomes
+        // an entity, the same as a chime arc with no standable launch point.
+        const obstacle = resolveObstacle(this.terrain, spec, index);
+        if (obstacle) target.obstacles.push(obstacle);
         break;
+      }
       case 'rail':
         target.rails.push(resolveRail(this.terrain, spec, index));
         break;

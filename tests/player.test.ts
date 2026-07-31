@@ -133,12 +133,14 @@ describe('Player', () => {
 
     it('suppression hides hazards from queries entirely', () => {
       const { world } = setup(7);
-      const before = world.obstaclesNear(4_000, 4_000).length;
+      // Wide enough to contain an obstacle regardless of how many nearby candidates the
+      // uphill filter (obstacles.ts) happens to reject for this seed.
+      const before = world.obstaclesNear(10_000, 10_000).length;
       expect(before).toBeGreaterThan(0);
       world.suppressHazards('test', -Infinity, Infinity);
-      expect(world.obstaclesNear(4_000, 4_000).length).toBe(0);
+      expect(world.obstaclesNear(10_000, 10_000).length).toBe(0);
       world.clearHazardSuppression('test');
-      expect(world.obstaclesNear(4_000, 4_000).length).toBe(before);
+      expect(world.obstaclesNear(10_000, 10_000).length).toBe(before);
     });
   });
 

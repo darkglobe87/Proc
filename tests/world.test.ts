@@ -3,7 +3,12 @@ import { Rng } from '../src/core/rng';
 import { World } from '../src/world/world';
 import { CHUNK_WIDTH, ChunkField, chunkIndexAt } from '../src/world/chunks';
 import type { ObstacleSpec } from '../src/world/chunks';
-import { distanceToObstacle, hitsObstacle, resolveObstacle } from '../src/world/obstacles';
+import {
+  UPHILL_SLOPE_LIMIT,
+  distanceToObstacle,
+  hitsObstacle,
+  resolveObstacle,
+} from '../src/world/obstacles';
 import { railCrossing, railYAt, resolveRail } from '../src/world/rails';
 
 describe('spawn generation', () => {
@@ -80,6 +85,45 @@ describe('obstacle fairness', () => {
     }
   });
 
+  it('never resolves onto uphill ground', () => {
+    // Clearing an obstacle means outrunning your own jump arc; running uphill eats into
+    // that margin, so obstacles must not resolve onto ground steeper than the documented
+    // limit. Checked at the World/resolve level, since chunks.ts has no terrain access
+    // and cannot know slope at generation time — see resolveObstacle.
+    for (const seed of [1, 5, 42, 777, 31337, 2024]) {
+      const world = new World(new Rng(seed));
+      for (const obstacle of world.obstaclesNear(30_000, 30_000)) {
+        const slope = world.terrain.slopeAt(obstacle.x);
+        expect(
+          slope,
+          `seed ${seed}: obstacle at x=${obstacle.x.toFixed(0)} sits on slope ${slope.toFixed(3)}`,
+        ).toBeGreaterThanOrEqual(-UPHILL_SLOPE_LIMIT);
+      }
+    }
+  });
+
+  it('rejects a spec placed on steep uphill ground, directly', () => {
+    const world = new World(new Rng(3));
+    // Search for ground steep enough uphill to guarantee rejection, rather than assuming
+    // one particular x — the terrain differs by seed and this only needs to exist somewhere.
+    let steepUphillX: number | null = null;
+    for (let x = 900; x < 40_000; x += 5) {
+      if (world.terrain.slopeAt(x) < -UPHILL_SLOPE_LIMIT - 0.05) {
+        steepUphillX = x;
+        break;
+      }
+    }
+    expect(steepUphillX, 'no sufficiently steep uphill ground found to test against').not.toBeNull();
+    if (steepUphillX === null) return;
+
+    const rejected = resolveObstacle(
+      world.terrain,
+      { kind: 'obstacle', slot: 0, x: steepUphillX, width: 24, height: 50, variant: 0 },
+      1,
+    );
+    expect(rejected).toBeNull();
+  });
+
   it('stays inside its own chunk', () => {
     const field = new ChunkField(new Rng(11));
     for (let index = 1; index < 30; index++) {
@@ -91,13 +135,22 @@ describe('obstacle fairness', () => {
   });
 });
 
+/** First x at or past `from` whose ground is not steep enough uphill to reject an obstacle. */
+function findNonUphillX(world: World, from: number): number {
+  for (let x = from; x < from + 5_000; x += 5) {
+    if (world.terrain.slopeAt(x) >= -UPHILL_SLOPE_LIMIT) return x;
+  }
+  throw new Error('no non-uphill ground found in range');
+}
+
 describe('obstacle collision', () => {
   const world = new World(new Rng(1));
   const obstacle = resolveObstacle(
     world.terrain,
-    { kind: 'obstacle', slot: 0, x: 1_000, width: 24, height: 50, variant: 0 },
+    { kind: 'obstacle', slot: 0, x: findNonUphillX(world, 1_000), width: 24, height: 50, variant: 0 },
     1,
   );
+  if (!obstacle) throw new Error('fixture obstacle unexpectedly rejected as uphill');
 
   it('hits when overlapping the box', () => {
     expect(hitsObstacle(obstacle, obstacle.x, obstacle.y - 20, 11)).toBe(true);
