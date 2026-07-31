@@ -4,18 +4,19 @@ import type { InputSnapshot } from '../src/core/input';
 import { Rng } from '../src/core/rng';
 import type { Terrain } from '../src/world/terrain';
 import { World } from '../src/world/world';
-import { LANDING_TOLERANCE, Player, classifyLanding } from '../src/player/player';
-import type { GameEvents, LandingQuality } from '../src/game/events';
+import { Player } from '../src/player/player';
+import type { GameEvents } from '../src/game/events';
 
 const DT = 1 / 60;
 
 function makeInput(overrides: Partial<InputSnapshot> = {}): InputSnapshot {
   return {
+    moveAxis: 0,
     jumpPressed: false,
     jumpReleased: false,
     jumpHeld: false,
     holdSeconds: 0,
-    divePressed: false,
+    interactPressed: false,
     pausePressed: false,
     restartPressed: false,
     pointerX: 0,
@@ -49,21 +50,19 @@ describe('Player', () => {
   describe('ground contact', () => {
     it('never passes through terrain over a long run', () => {
       // Tunnelling is unrecoverable: once below the surface every later test also
-      // fails and the run is stuck. This is the single most important invariant here.
+      // fails. This is the single most important invariant here.
       const { terrain, player, bus } = setup(90210);
       let worstPenetration = 0;
       let worstX = 0;
 
       for (let step = 0; step < 10_000; step++) {
-        // Jump periodically and hold sometimes, to exercise flight and dives.
         const input = makeInput({
-          jumpPressed: step % 97 === 0,
-          jumpHeld: step % 97 < 12,
-          holdSeconds: (step % 97) * DT,
-          divePressed: step % 271 === 0,
+          moveAxis: Math.sin(step * 0.01) > 0 ? 1 : -1,
+          jumpPressed: step % 53 === 0,
+          jumpHeld: step % 53 < 20,
+          holdSeconds: (step % 53) * DT,
         });
         player.update(DT, input, bus);
-        if (player.dead) player.reset();
 
         const penetration = player.y - terrain.heightAt(player.x);
         if (penetration > worstPenetration) {
@@ -78,314 +77,251 @@ describe('Player', () => {
       ).toBeLessThan(1);
     });
 
-    it('holds speed within bounds no matter the terrain', () => {
+    /**
+     * Regression test for a real bug found in play, not caught by the test above:
+     * sustained forward movement with periodic held jumps eventually tunnelled
+     * through an uphill slope and fell forever, `vy` climbing without bound.
+     *
+     * Root cause was in the old `sweepVertical`, which compared the fall's end
+     * height against terrain sampled only at the final x — wrong the instant the
+     * ground under the end of a step differs even slightly from the ground under
+     * where the crossing actually happened, which any slope does, every step. Once
+     * one fall was misjudged "still airborne" by a single step, the very next
+     * step's "was above the ground at the start" guard could never be true again,
+     * since y only grows deeper from there — see `world/solids.ts`'s `sweepVertical`
+     * and its own direct test for the fix. This test is the end-to-end guard: sustained
+     * one-directional play, across many seeds and far enough to cross real uphill
+     * ground, must never let `vy` run away.
+     */
+    it('never falls forever, across sustained forward movement and many jumps', () => {
+      for (const seed of [1, 7, 90210, 31337, 5028]) {
+        const { terrain, player, bus } = setup(seed);
+        for (let step = 0; step < 15_000; step++) {
+          const jumpPhase = step % 180;
+          player.update(
+            DT,
+            makeInput({
+              moveAxis: 1,
+              jumpPressed: jumpPhase === 0,
+              jumpHeld: jumpPhase < 10,
+              holdSeconds: jumpPhase * DT,
+            }),
+            bus,
+          );
+          expect(Math.abs(player.vy), `seed ${seed} runaway at step ${step}`).toBeLessThan(3000);
+          expect(
+            player.y - terrain.heightAt(player.x),
+            `seed ${seed} tunnelled at step ${step}, x=${player.x.toFixed(0)}`,
+          ).toBeLessThan(5);
+        }
+      }
+    });
+
+    it('never exceeds top speed no matter how long the pad is held', () => {
       const { player, bus } = setup(5);
-      for (let step = 0; step < 6_000; step++) {
-        player.update(DT, makeInput(), bus);
-        if (player.dead) player.reset();
-        expect(player.vx).toBeGreaterThan(0);
-        expect(player.vx).toBeLessThanOrEqual(900);
+      for (let step = 0; step < 3_000; step++) {
+        player.update(DT, makeInput({ moveAxis: 1 }), bus);
+        expect(Math.abs(player.vx)).toBeLessThanOrEqual(210 + 1e-6);
         expect(Number.isFinite(player.y)).toBe(true);
       }
     });
 
-    it('advances distance monotonically', () => {
+    it('tracks the furthest x reached as `distance`, in either direction', () => {
       const { player, bus } = setup(11);
+      for (let step = 0; step < 300; step++) player.update(DT, makeInput({ moveAxis: 1 }), bus);
+      // Let vx fully decelerate through zero and turn around before snapshotting the
+      // peak — while vx is still positive during that turnaround, x (and so distance)
+      // keeps growing for a few more frames even though the pad has already reversed.
+      for (let step = 0; step < 30; step++) player.update(DT, makeInput({ moveAxis: -1 }), bus);
+      const peak = player.distance;
+
+      for (let step = 0; step < 400; step++) player.update(DT, makeInput({ moveAxis: -1 }), bus);
+      // Walking back past the origin does not erase how far right was once reached.
+      expect(player.distance).toBe(peak);
+      expect(player.x).toBeLessThan(peak);
+    });
+  });
+
+  describe('walking', () => {
+    it('accelerates toward the pad axis and stops accelerating at top speed', () => {
+      const { player, bus } = setup(1);
       let previous = 0;
-      for (let step = 0; step < 2_000; step++) {
-        player.update(DT, makeInput(), bus);
-        expect(player.distance).toBeGreaterThanOrEqual(previous);
-        previous = player.distance;
+      for (let step = 0; step < 200; step++) {
+        player.update(DT, makeInput({ moveAxis: 1 }), bus);
+        expect(player.vx).toBeGreaterThanOrEqual(previous - 1e-6);
+        previous = player.vx;
       }
-      expect(player.distance).toBeGreaterThan(1_000);
+      expect(player.vx).toBeCloseTo(210, 0);
+    });
+
+    it('faces the direction last pushed, and holds that facing when released', () => {
+      const { player, bus } = setup(1);
+      player.update(DT, makeInput({ moveAxis: -1 }), bus);
+      expect(player.facing).toBe(-1);
+      player.update(DT, makeInput({ moveAxis: 0 }), bus);
+      expect(player.facing).toBe(-1); // releasing the pad does not turn you around
+    });
+
+    it('decelerates to a stop once the pad is released', () => {
+      const { player, bus } = setup(1);
+      for (let step = 0; step < 60; step++) player.update(DT, makeInput({ moveAxis: 1 }), bus);
+      expect(player.vx).toBeGreaterThan(50);
+
+      for (let step = 0; step < 60; step++) player.update(DT, makeInput(), bus);
+      expect(player.vx).toBe(0);
     });
   });
 
-  describe('difficulty', () => {
-    it('never kills a passive player with terrain alone', () => {
-      // Hazards are suppressed so this measures only the ground, launches and landings.
-      // Dying here would mean the terrain generator or the landing tolerance is hostile —
-      // crashes must come from the player's choices, not from the scenery.
-      for (const seed of [1, 2, 3, 5, 8, 13, 21]) {
-        const { world, player, bus } = setup(seed);
-        world.suppressHazards('test', -Infinity, Infinity);
-        for (let step = 0; step < 4_000 && !player.dead; step++) {
-          player.update(DT, makeInput(), bus);
-        }
-        expect(player.distance, `seed ${seed} died at ${player.distance.toFixed(0)}px`)
-          .toBeGreaterThan(5_000);
-      }
-    });
-
-    it('does kill a passive player once obstacles are in play', () => {
-      // The complement of the test above, and the reason obstacles exist: ignoring the
-      // controls should not be a viable strategy.
-      let deaths = 0;
-      for (const seed of [1, 2, 3, 5, 8, 13, 21]) {
-        const { player, bus } = setup(seed);
-        for (let step = 0; step < 4_000 && !player.dead; step++) {
-          player.update(DT, makeInput(), bus);
-        }
-        if (player.dead) deaths++;
-      }
-      expect(deaths).toBeGreaterThan(4);
-    });
-
-    it('suppression hides hazards from queries entirely', () => {
-      const { world } = setup(7);
-      // Wide enough to contain an obstacle regardless of how many nearby candidates the
-      // uphill filter (obstacles.ts) happens to reject for this seed.
-      const before = world.obstaclesNear(10_000, 10_000).length;
-      expect(before).toBeGreaterThan(0);
-      world.suppressHazards('test', -Infinity, Infinity);
-      expect(world.obstaclesNear(10_000, 10_000).length).toBe(0);
-      world.clearHazardSuppression('test');
-      expect(world.obstaclesNear(10_000, 10_000).length).toBe(before);
-    });
-  });
-
-  describe('classifyLanding', () => {
-    /** Verdict for a body angle `offsetDegrees` away from the surface. */
-    function verdict(offsetDegrees: number, surfaceDegrees = 0): LandingQuality {
-      const surface = (surfaceDegrees * Math.PI) / 180;
-      return classifyLanding(surface + (offsetDegrees * Math.PI) / 180, surface);
-    }
-
-    it('treats a well-aligned landing as clean', () => {
-      for (const offset of [0, 10, -10, 20, -20, 34, -34]) {
-        expect(verdict(offset), `${offset}°`).toBe('clean');
-      }
-    });
-
-    it('treats a moderately off landing as sloppy but survivable', () => {
-      for (const offset of [40, -40, 55, -55, 74, -74]) {
-        expect(verdict(offset), `${offset}°`).toBe('sloppy');
-      }
-    });
-
-    it('crashes when landing inverted', () => {
-      for (const offset of [80, -80, 120, 180, -120]) {
-        expect(verdict(offset), `${offset}°`).toBe('crash');
-      }
-    });
-
-    it('pins the boundaries at the documented 35 and 75 degrees', () => {
-      // These tolerances are the primary feel dial, so their values are asserted —
-      // widening them should be a deliberate edit, not a silent drift.
-      expect(verdict(34.9)).toBe('clean');
-      expect(verdict(35.1)).toBe('sloppy');
-      expect(verdict(74.9)).toBe('sloppy');
-      expect(verdict(75.1)).toBe('crash');
-      expect(LANDING_TOLERANCE.clean).toBeCloseTo((35 * Math.PI) / 180, 9);
-      expect(LANDING_TOLERANCE.sloppy).toBeCloseTo((75 * Math.PI) / 180, 9);
-    });
-
-    it('judges relative to the surface, not to horizontal', () => {
-      // On a 40° slope, matching the slope is clean while staying horizontal is not.
-      // Judging against horizontal instead would invert this and make every steep
-      // landing lethal.
-      const slope = (40 * Math.PI) / 180;
-      expect(classifyLanding(slope, slope)).toBe('clean');
-      expect(classifyLanding(0, slope)).toBe('sloppy');
-    });
-
-    it('wraps angles, so a rotation of 350 degrees is nearly upright', () => {
-      expect(verdict(350)).toBe('clean');
-      expect(verdict(-350)).toBe('clean');
-      expect(verdict(365)).toBe('clean');
-    });
-  });
-
-  describe('landing', () => {
-    it('kills the player only on a crash', () => {
-      const { world, terrain, player, bus } = setup(31337);
-      // Landing classification is what is under test; an obstacle at the chosen spot
-      // would be a different cause of death.
-      world.suppressHazards('test', -Infinity, Infinity);
-      const flatX = findFlat(terrain, 1_500, 3_000);
-      player.x = flatX;
-      player.y = terrain.heightAt(flatX) - 40;
-      player.vy = 260;
-      player.grounded = false;
-      player.rotation = terrain.angleAt(flatX);
-      for (let step = 0; step < 120 && !player.grounded; step++) {
-        player.update(DT, makeInput(), bus);
-      }
-      expect(player.grounded).toBe(true);
-      expect(player.dead).toBe(false);
-    });
-
-    it('crashes when a committed flip is landed part-way round', () => {
-      // The end-to-end version of the risk mechanic: choosing to rotate disables
-      // self-levelling, so bailing out mid-flip is fatal.
-      const { player, bus } = setup(4242);
-      let crashed = false;
-      bus.on('player:crash', () => {
-        crashed = true;
-      });
-
-      player.update(DT, makeInput({ jumpPressed: true, jumpHeld: true }), bus);
-      player.vy = -1100;
-      // Hold past the spin delay and on into roughly a half rotation, then release and
-      // ride it down.
-      for (let step = 0; step < 42; step++) {
-        player.update(DT, makeInput({ jumpHeld: true, holdSeconds: step * DT }), bus);
-      }
-      for (let step = 0; step < 200 && !player.grounded; step++) {
-        player.update(DT, makeInput(), bus);
-      }
-      expect(crashed).toBe(true);
-      expect(player.dead).toBe(true);
-    });
-
-    it('does not pay a boost for merely brushing the ground', () => {
-      // Guards the feedback loop that once pinned speed at maximum: a tangential launch
-      // re-contacted within two frames, each touch scored as a clean landing, and the
-      // boost compounded until the player was stuck at max speed making no progress.
-      const { terrain, player, bus } = setup(31337);
-      const flatX = findFlat(terrain, 1_500, 3_000);
-
-      player.x = flatX;
-      player.y = terrain.heightAt(flatX) - 1; // a hair above the surface
-      player.vx = 300;
-      player.vy = 20;
-      player.grounded = false;
-      player.rotation = terrain.angleAt(flatX);
-
-      let landedAirtime = Infinity;
-      bus.on('player:land', ({ airtime }) => {
-        landedAirtime = Math.min(landedAirtime, airtime);
-      });
-
-      const before = player.vx;
-      for (let step = 0; step < 10 && !player.grounded; step++) {
-        player.update(DT, makeInput(), bus);
-      }
-
-      expect(player.grounded).toBe(true);
-      expect(landedAirtime).toBeLessThan(0.12); // genuinely a brush, not a jump
-      // Speed may ease toward its cruise target, but must not have been boosted.
-      expect(player.vx).toBeLessThanOrEqual(before + 10);
-    });
-  });
-
-  describe('launching', () => {
-    it('leaves the ground without a jump when fast over a crest', () => {
-      // The curvature criterion: air should be earned by speed and line, not only by
-      // pressing the button. Hazards are suppressed because a passive player otherwise
-      // dies near the start and never builds the speed a natural launch requires.
-      const { world, player, bus } = setup(777);
-      world.suppressHazards('test', -Infinity, Infinity);
-      let naturalLaunches = 0;
-      bus.on('player:launch', ({ jumped }) => {
-        if (!jumped) naturalLaunches++;
-      });
-
-      for (let step = 0; step < 8_000; step++) {
-        player.update(DT, makeInput(), bus);
-        if (player.dead) player.reset();
-      }
-      expect(naturalLaunches).toBeGreaterThan(0);
-    });
-
-    it('does not launch off flat ground', () => {
-      const { terrain, player, bus } = setup(31337);
-      const flatX = findFlat(terrain, 1_500, 3_000);
-      let launched = false;
-      bus.on('player:launch', () => {
-        launched = true;
-      });
-
-      player.x = flatX - 20;
-      player.y = terrain.heightAt(player.x);
-      player.vx = 300;
-      player.grounded = true;
-      for (let step = 0; step < 8; step++) player.update(DT, makeInput(), bus);
-      expect(launched).toBe(false);
-    });
-
-    it('jumps when asked', () => {
+  describe('jumping', () => {
+    it('jumps when pressed, leaving the ground', () => {
       const { player, bus } = setup(42);
       const before = player.y;
       player.update(DT, makeInput({ jumpPressed: true, jumpHeld: true }), bus);
       expect(player.grounded).toBe(false);
-      expect(player.y).toBeLessThan(before); // smaller y is higher
+      expect(player.vy).toBeLessThan(0); // the impulse fires this step...
+      player.update(DT, makeInput({ jumpHeld: true, holdSeconds: DT }), bus);
+      expect(player.y).toBeLessThan(before); // ...and y actually rises the next
+    });
+
+    it('jumps higher the longer the button is held, up to the cap', () => {
+      const { terrain } = setup(31337);
+      const flatX = findFlat(terrain, 1_500, 3_000);
+
+      function apexHeight(holdSteps: number): number {
+        const { player, bus } = setup(31337);
+        player.x = flatX;
+        player.y = terrain.heightAt(flatX);
+        player.update(DT, makeInput({ jumpPressed: true, jumpHeld: true }), bus);
+        let apex = player.y;
+        for (let step = 0; step < 90; step++) {
+          const held = step < holdSteps;
+          player.update(DT, makeInput({ jumpHeld: held, holdSeconds: step * DT }), bus);
+          apex = Math.min(apex, player.y);
+          if (player.grounded) break;
+        }
+        return apex;
+      }
+
+      const shortHop = apexHeight(1);
+      const fullHop = apexHeight(30);
+      expect(fullHop).toBeLessThan(shortHop); // smaller y is higher
+    });
+
+    it('grants coyote time: a jump just after walking off an edge still fires', () => {
+      const { world, player, bus } = setup(9001);
+      world.suppressHazards('test', -Infinity, Infinity);
+      player.x = 0;
+      player.y = world.terrain.heightAt(0);
+      player.grounded = true;
+
+      // Force airborne the way walking off a ledge would, without a jump input.
+      player.update(DT, makeInput({ moveAxis: 1 }), bus);
+      player.grounded = false;
+      player.vy = 0;
+
+      // Within the coyote window (a couple of steps), a press must still jump.
+      player.update(DT, makeInput({ jumpPressed: true, jumpHeld: true }), bus);
+      expect(player.vy).toBeLessThan(0);
+    });
+
+    it('does not grant coyote time long after leaving the ground', () => {
+      const { world, player, bus } = setup(9001);
+      // Well clear of the ground, so the fall genuinely lasts the whole loop below
+      // rather than landing partway through it and confusing "airborne" with "grounded".
+      player.y = world.terrain.heightAt(0) - 500;
+      player.grounded = false;
+      player.vy = 50; // already falling, well past any edge
+      for (let step = 0; step < 30; step++) player.update(DT, makeInput(), bus);
+      expect(player.grounded).toBe(false); // still genuinely airborne
+      const vyBefore = player.vy;
+      player.update(DT, makeInput({ jumpPressed: true, jumpHeld: true }), bus);
+      // No jump impulse this late — vy keeps integrating gravity, it does not snap negative.
+      expect(player.vy).toBeGreaterThan(vyBefore);
+    });
+
+    it('buffers a jump pressed just before landing', () => {
+      const { terrain, player, bus } = setup(31337);
+      const flatX = findFlat(terrain, 1_500, 3_000);
+      player.x = flatX;
+      player.y = terrain.heightAt(flatX) - 20;
+      player.vy = 200; // already falling, about to land
+      player.grounded = false;
+
+      // Press now, one step before contact.
+      player.update(DT, makeInput({ jumpPressed: true }), bus);
+      // Ride it down; the buffered press should fire the instant the ground is reached.
+      let jumped = false;
+      for (let step = 0; step < 10; step++) {
+        player.update(DT, makeInput(), bus);
+        if (!player.grounded && player.vy < 0) jumped = true;
+      }
+      expect(jumped).toBe(true);
     });
   });
 
-  describe('tricks', () => {
-    it('counts a full rotation as a flip', () => {
-      const { player, bus } = setup(8);
-      const flips: number[] = [];
-      bus.on('player:trick', ({ flips: count }) => flips.push(count));
+  describe('hazards', () => {
+    it('is knocked back to the last safe ground on contact, without ending anything', () => {
+      const { world, terrain, player, bus } = setup(7);
+      const obstacle = [...world.obstaclesNear(10_000, 10_000)][0];
+      expect(obstacle).toBeDefined();
+      if (!obstacle) return;
 
-      player.update(DT, makeInput({ jumpPressed: true, jumpHeld: true }), bus);
-      // Buy generous airtime. A flip needs more air than a flat jump provides by
-      // design, so doing this off a bare jump would measure the jump tuning rather
-      // than the flip counter.
-      player.vy = -1400;
-      for (let step = 0; step < 150; step++) {
-        player.update(DT, makeInput({ jumpHeld: true, holdSeconds: step * DT }), bus);
-        if (player.grounded) break;
-      }
-      expect(flips[0]).toBe(1);
+      let hurt = false;
+      bus.on('player:hurt', () => {
+        hurt = true;
+      });
+
+      const flatX = findFlat(terrain, 1_500, 3_000);
+      player.x = flatX;
+      player.y = terrain.heightAt(flatX);
+      player.grounded = true;
+      // Walk the last safe position forward one real step so it is recorded.
+      player.update(DT, makeInput(), bus);
+      const safeX = player.x;
+      const safeY = player.y;
+
+      player.x = obstacle.x;
+      player.y = obstacle.y - 20;
+      player.update(DT, makeInput(), bus);
+
+      expect(hurt).toBe(true);
+      expect(player.x).toBeCloseTo(safeX, 3);
+      expect(player.y).toBeCloseTo(safeY, 3);
+      expect(player.isHurt).toBe(true);
     });
 
-    it('does not spin during a maximum-height jump', () => {
-      // Jump height and tricks share one button. If holding for height also rotated the
-      // player, every full-power jump would land inverted and kill the run — the game
-      // would punish using its own jump. This is the regression guard for that.
-      const { player, bus } = setup(8);
-      player.update(DT, makeInput({ jumpPressed: true, jumpHeld: true }), bus);
-      const launchRotation = player.rotation;
+    it('is briefly invulnerable after a hit, so standing in the same spot cannot re-trigger', () => {
+      const { world, player, bus } = setup(7);
+      const obstacle = [...world.obstaclesNear(10_000, 10_000)][0];
+      expect(obstacle).toBeDefined();
+      if (!obstacle) return;
 
-      // Hold for the full variable-height window, then release, as a player reaching
-      // for maximum height would.
-      for (let step = 0; step < 14; step++) {
-        player.update(DT, makeInput({ jumpHeld: true, holdSeconds: step * DT }), bus);
-        if (player.grounded) break;
-      }
-      // Self-levelling tracks the ground angle beneath, so a few degrees of drift is
-      // expected and fine. What must not happen is the ~120° of spin that holding for
-      // height used to produce.
-      expect(Math.abs(player.rotation - launchRotation)).toBeLessThan(0.2);
-      expect(player.isFlipping).toBe(false);
-    });
+      let hits = 0;
+      bus.on('player:hurt', () => hits++);
 
-    it('freezes rotation when the button is released, so a landing can be aimed', () => {
-      const { player, bus } = setup(8);
-      player.update(DT, makeInput({ jumpPressed: true, jumpHeld: true }), bus);
-      player.vy = -1400;
-
-      // Hold well past the spin delay so rotation is genuinely under way.
-      let held = 0;
+      player.x = obstacle.x;
+      player.y = obstacle.y - 20;
       for (let step = 0; step < 30; step++) {
-        held = step * DT;
-        player.update(DT, makeInput({ jumpHeld: true, holdSeconds: held }), bus);
-      }
-      expect(player.isFlipping).toBe(true);
-
-      const frozen = player.rotation;
-      for (let step = 0; step < 5; step++) {
+        player.x = obstacle.x; // hold it in the hazard the whole time
+        player.y = obstacle.y - 20;
         player.update(DT, makeInput(), bus);
-        if (player.grounded) break;
       }
-      expect(player.rotation).toBeCloseTo(frozen, 6);
+      expect(hits).toBe(1);
     });
   });
 
   describe('reset', () => {
     it('returns to a clean starting state', () => {
       const { terrain, player, bus } = setup(3);
-      for (let step = 0; step < 500; step++) player.update(DT, makeInput(), bus);
-      player.dead = true;
+      for (let step = 0; step < 500; step++) player.update(DT, makeInput({ moveAxis: 1 }), bus);
       player.reset();
 
       expect(player.x).toBe(0);
       expect(player.y).toBeCloseTo(terrain.heightAt(0), 6);
-      expect(player.dead).toBe(false);
       expect(player.grounded).toBe(true);
+      expect(player.vx).toBe(0);
       expect(player.distance).toBe(0);
+      expect(player.isHurt).toBe(false);
     });
   });
 });

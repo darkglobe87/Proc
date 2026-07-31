@@ -11,19 +11,13 @@ import type { SafeAreaInsets } from '../core/viewport';
 
 export interface HudModel {
   distanceMetres: number;
-  bestMetres: number;
+  furthestMetres: number;
   seedCode: string;
   isDaily: boolean;
-  state: 'ready' | 'running' | 'dead';
-  flips: number;
+  state: 'ready' | 'exploring';
   chimes: number;
-  bestChimes: number;
-  score: number;
-  /** Current multiplier, 1..MAX_FLOW. */
-  flow: number;
-  /** 0..1 through the idle grace period; 1 means it is about to bleed away. */
-  flowIdle: number;
-  grinding: boolean;
+  /** True right after a hazard hit, while the player is briefly invulnerable. */
+  hurt: boolean;
   /** Currently active twist labels, shown persistently — a twist must be readable at a glance. */
   activeTwists: readonly string[];
   /** Non-empty only during the telegraph window ahead of a Shift landing. */
@@ -47,14 +41,14 @@ export function drawHud(
   const top = 26 + insets.top;
   const right = width - 16 - insets.right;
 
-  builder.text('text', 'hud', left, top, `${model.distanceMetres} m`, 24, 'left', 600);
+  builder.text('text', 'hud', left, top, `${model.distanceMetres} m`, 20, 'left', 600);
   builder.text(
     'textDim',
     'hud',
     left,
-    top + 20,
-    `BEST ${model.bestMetres} m`,
-    13,
+    top + 18,
+    `FURTHEST ${model.furthestMetres} m`,
+    12,
     'left',
     500,
   );
@@ -62,9 +56,9 @@ export function drawHud(
     'textDim',
     'hud',
     left,
-    top + 38,
+    top + 34,
     `${model.isDaily ? 'DAILY' : 'SEED'} ${model.seedCode}`,
-    13,
+    12,
     'left',
     500,
   );
@@ -76,7 +70,7 @@ export function drawHud(
       'accent',
       'hud',
       left,
-      top + 58,
+      top + 52,
       model.activeTwists.join(' + ').toUpperCase(),
       13,
       'left',
@@ -84,34 +78,8 @@ export function drawHud(
     );
   }
 
-  // Chimes and multiplier, centred at the top — the pair the player watches while chaining.
-  builder.text('chime', 'hud', width / 2, top, `◈ ${model.chimes}`, 20, 'center', 600);
-  if (model.score > 0) {
-    builder.text('textDim', 'hud', width / 2, top + 18, `${model.score}`, 13, 'center');
-  }
-
-  if (model.flow > 1.05) {
-    const y = top + 42;
-    builder.text('accent', 'hud', width / 2, y, `×${model.flow.toFixed(1)}`, 22, 'center', 700);
-
-    // Decay bar: drains as the idle grace runs out, so the player can see the chain
-    // slipping before it actually starts costing them.
-    const barWidth = 74;
-    const remaining = 1 - model.flowIdle;
-    builder.polyline('textDim', 'hud', 3, 0.3);
-    builder.point(width / 2 - barWidth / 2, y + 10);
-    builder.point(width / 2 + barWidth / 2, y + 10);
-    builder.end();
-    if (remaining > 0) {
-      builder.polyline('accent', 'hud', 3, 0.9);
-      builder.point(width / 2 - barWidth / 2, y + 10);
-      builder.point(width / 2 - barWidth / 2 + barWidth * remaining, y + 10);
-      builder.end();
-    }
-  }
-
-  if (model.grinding) {
-    builder.text('accent', 'hud', width / 2, height * 0.36, 'GRIND', 20, 'center', 700);
+  if (model.chimes > 0) {
+    builder.text('chime', 'hud', width / 2, top, `◈ ${model.chimes}`, 18, 'center', 600);
   }
 
   // The telegraph banner: the one advance warning a Shift gives before it lands.
@@ -120,12 +88,16 @@ export function drawHud(
       'text',
       'hud',
       width / 2,
-      top + 78,
+      top + 24,
       model.telegraphLabels.join(' + ').toUpperCase(),
       18,
       'center',
       700,
     );
+  }
+
+  if (model.hurt) {
+    builder.text('hazard', 'hud', width / 2, height * 0.3, 'OUCH', 22, 'center', 700, 0.85);
   }
 
   if (model.showDiagnostics) {
@@ -152,20 +124,6 @@ export function drawHud(
     }
   }
 
-  // Live trick counter, so a flip in progress reads as deliberate rather than a slip.
-  if (model.flips > 0 && model.state === 'running') {
-    builder.text(
-      'accent',
-      'hud',
-      width / 2,
-      height * 0.28,
-      model.flips === 1 ? 'FLIP' : `${model.flips}× FLIP`,
-      26,
-      'center',
-      700,
-    );
-  }
-
   if (!model.landscape) {
     builder.text(
       'text',
@@ -187,30 +145,7 @@ export function drawHud(
       'hud',
       width / 2,
       height * 0.5 + 26,
-      'tap to run · hold to flip · swipe down to dive',
-      14,
-      'center',
-    );
-  }
-
-  if (model.state === 'dead') {
-    builder.text('text', 'hud', width / 2, height * 0.42, `${model.distanceMetres} m`, 44, 'center', 700);
-    builder.text(
-      'chime',
-      'hud',
-      width / 2,
-      height * 0.42 + 26,
-      `◈ ${model.chimes}   ·   ${model.score} pts`,
-      15,
-      'center',
-      600,
-    );
-    builder.text(
-      'textDim',
-      'hud',
-      width / 2,
-      height * 0.42 + 50,
-      model.distanceMetres >= model.bestMetres ? 'new best · tap to run again' : 'tap to run again',
+      'drag left to move · tap right to jump',
       14,
       'center',
     );

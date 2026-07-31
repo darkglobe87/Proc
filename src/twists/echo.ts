@@ -111,13 +111,13 @@ export function createEchoTwist(): Twist {
 
       const cos = Math.cos(at.rotation);
       const sin = Math.sin(at.rotation);
-      const halfLength = 17;
-      const thickness = 4;
+      const halfWidth = 9;
+      const bodyHeight = 30;
       const corners: ReadonlyArray<readonly [number, number]> = [
-        [-halfLength, -thickness],
-        [halfLength, -thickness],
-        [halfLength, thickness],
-        [-halfLength, thickness],
+        [-halfWidth, -bodyHeight],
+        [halfWidth, -bodyHeight],
+        [halfWidth, 0],
+        [-halfWidth, 0],
       ];
 
       builder.polygon('trail', 'entities', 0.4);
@@ -126,12 +126,12 @@ export function createEchoTwist(): Twist {
       }
       builder.end();
 
-      const riderLocalY = -(GHOST_RADIUS + 6);
+      const headLocalY = -(bodyHeight + 7);
       builder.disc(
         'trail',
         'entities',
-        at.x - riderLocalY * sin,
-        at.y + riderLocalY * cos,
+        at.x - headLocalY * sin,
+        at.y + headLocalY * cos,
         GHOST_RADIUS,
         0.4,
       );

@@ -2,12 +2,13 @@
  * Camera.
  *
  * Carries `zoom` and `rotation` from the outset even though this milestone only moves
- * x and y, so the Zoom Out and Slow Rotate twists need no refactor later — they just
- * animate fields that already exist and are already honoured by the transform.
+ * x and y, so twists that animate them need no refactor later — they just write
+ * fields that already exist and are already honoured by the transform.
  *
- * Vertical motion is eased rather than rigid. Locking y to the player makes the whole
- * horizon pump up and down over every dune, which is both ugly and nauseating; easing
- * lets the player move within the frame while the world stays level.
+ * Both axes now use a dead zone plus easing, not just the vertical one the runner
+ * used: the player can stop, back up and turn around, so the horizontal camera can no
+ * longer be rigidly locked to their x the way an always-forward runner's could be —
+ * rigid tracking would slam the frame sideways the instant they reversed direction.
  */
 
 import type { CameraView } from '../render/scene';
@@ -16,12 +17,13 @@ import type { CameraView } from '../render/scene';
 export const ANCHOR_X = 0.32;
 export const ANCHOR_Y = 0.58;
 
-/** Vertical easing, in fraction-per-second toward the target. */
-const Y_EASE = 5.5;
-/** Look-ahead in pixels at full speed, so faster running reveals more ground. */
-const LOOK_AHEAD = 130;
-/** How far the player may drift from the anchor before y is pulled harder. */
-const Y_DEADZONE = 70;
+/** Easing, in fraction-per-second toward the target, once outside the dead zone. */
+const EASE = 6;
+/** Look-ahead in pixels in the direction faced, revealing what's ahead of a turn. */
+const LOOK_AHEAD = 90;
+/** How far the player may drift from the anchor, either axis, before the camera reacts. */
+const DEADZONE_X = 60;
+const DEADZONE_Y = 70;
 
 /**
  * The continuous render knobs a twist may bend. Owned here, next to the camera fields
@@ -58,10 +60,10 @@ export class Camera implements CameraView {
   /**
    * @param targetX  Player world x.
    * @param targetY  Player world y.
-   * @param speedRatio 0..1 of maximum speed, driving look-ahead.
+   * @param facing   Direction faced, ±1 — drives which way the look-ahead leans.
    */
-  follow(targetX: number, targetY: number, speedRatio: number, dt: number): void {
-    const desiredX = targetX + LOOK_AHEAD * speedRatio;
+  follow(targetX: number, targetY: number, facing: 1 | -1, dt: number): void {
+    const desiredX = targetX + LOOK_AHEAD * facing;
 
     if (this.snapNext) {
       this.x = desiredX;
@@ -70,16 +72,16 @@ export class Camera implements CameraView {
       return;
     }
 
-    // Horizontal tracking is rigid: the runner must not slide around the frame, or
-    // judging an approaching gap becomes guesswork.
-    this.x = desiredX;
+    const offsetX = desiredX - this.x;
+    if (Math.abs(offsetX) > DEADZONE_X) {
+      const excess = offsetX > 0 ? offsetX - DEADZONE_X : offsetX + DEADZONE_X;
+      this.x += excess * Math.min(1, EASE * dt);
+    }
 
-    // Vertical uses a dead zone plus easing. Inside the dead zone the camera holds
-    // still, so small dune undulations do not move the horizon at all.
-    const offset = targetY - this.y;
-    if (Math.abs(offset) > Y_DEADZONE) {
-      const excess = offset > 0 ? offset - Y_DEADZONE : offset + Y_DEADZONE;
-      this.y += excess * Math.min(1, Y_EASE * dt);
+    const offsetY = targetY - this.y;
+    if (Math.abs(offsetY) > DEADZONE_Y) {
+      const excess = offsetY > 0 ? offsetY - DEADZONE_Y : offsetY + DEADZONE_Y;
+      this.y += excess * Math.min(1, EASE * dt);
     }
   }
 }

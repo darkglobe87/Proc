@@ -9,33 +9,27 @@
 
 import type { EventBus } from '../core/events';
 
-export type LandingQuality = 'clean' | 'sloppy' | 'crash';
-
 export interface GameEvents extends Record<string, unknown> {
-  /** Left the ground, whether by jumping or by running off a crest. */
-  'player:launch': { x: number; y: number; jumped: boolean };
-  /** Touched down. `flips` counts completed rotations in that flight. */
-  'player:land': { x: number; y: number; quality: LandingQuality; flips: number; airtime: number };
-  /** A full rotation completed while airborne. */
-  'player:trick': { flips: number };
-  /** Started or finished grinding a rail. */
-  'player:grind': { rail: number; started: boolean };
-  /** Run-ending impact. */
-  'player:crash': { x: number; y: number; reason: 'landing' | 'obstacle' | 'rail' };
+  /** Jumped. */
+  'player:launch': { x: number; y: number };
+  /** Touched down on the ground or a ledge. */
+  'player:land': { x: number; y: number };
+  /**
+   * Hazard contact. Never run-ending — see `Player.hurt` — this is the moment a
+   * respawn-to-last-safe-ground happens, for camera shake, a sound, a screen flash.
+   */
+  'player:hurt': { x: number; y: number };
   /**
    * A chime was taken. `pitch` is a scale degree rising along its arc — the hook the
    * generative score consumes so that collecting is literally playing the music.
    */
-  'chime:collect': { pitch: number; index: number; total: number; value: number };
-  /** Passed close to a hazard without touching it. */
-  'player:nearMiss': { obstacle: number; distance: number };
+  'chime:collect': { pitch: number; index: number; total: number };
   /** A Shift is about to land — the telegraph window. `labels` name what's coming. */
   'twist:telegraph': { labels: readonly string[] };
   /** The telegraphed Shift has landed and is now the active set. */
   'twist:shift': { ids: readonly string[]; shiftIndex: number };
   /** Run lifecycle. */
   'run:start': { seed: number };
-  'run:end': { distance: number; best: boolean };
 }
 
 export type GameBus = EventBus<GameEvents>;

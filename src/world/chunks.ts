@@ -24,7 +24,7 @@ export interface Feature {
 }
 
 /*
- * Placements for everything that is not terrain: collectibles, hazards, rails.
+ * Placements for everything that is not terrain: collectibles, hazards, ledges.
  *
  * These are *specs*, carrying no y coordinate. Resolving them into world positions needs
  * ground height, but `Terrain` owns this module — so the spec/resolve split keeps the
@@ -61,18 +61,21 @@ export interface ObstacleSpec {
   variant: number;
 }
 
-export interface RailSpec {
-  kind: 'rail';
+/**
+ * A one-way ledge: a flat platform floating above the terrain, standable from above
+ * and passable from below and the sides.
+ */
+export interface LedgeSpec {
+  kind: 'ledge';
   slot: number;
   x: number;
-  length: number;
-  /** How far above the ground the rail floats at its start. */
+  width: number;
+  /** How far above the ground beneath its centre the ledge floats. */
   clearance: number;
-  /** Slope of the rail, dy/dx. */
-  tilt: number;
+  thickness: number;
 }
 
-export type SpawnSpec = ChimeArcSpec | ObstacleSpec | RailSpec;
+export type SpawnSpec = ChimeArcSpec | ObstacleSpec | LedgeSpec;
 
 export interface Chunk {
   index: number;
@@ -301,12 +304,12 @@ export class ChunkField {
 
     if (rng.bool(0.4)) {
       spawns.push({
-        kind: 'rail',
+        kind: 'ledge',
         slot: slot++,
-        x: rng.range(start + 100, start + CHUNK_WIDTH - 340),
-        length: rng.range(180, 300),
-        clearance: rng.range(46, 92),
-        tilt: rng.range(-0.12, 0.12),
+        x: rng.range(start + 100, start + CHUNK_WIDTH - 220),
+        width: rng.range(120, 220),
+        clearance: rng.range(50, 100),
+        thickness: rng.range(10, 16),
       });
     }
 

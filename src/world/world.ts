@@ -15,14 +15,14 @@
 import type { Rng } from '../core/rng';
 import { Terrain } from './terrain';
 import { MAX_SPAWN_REACH, chunkIndexAt, type SpawnSpec } from './chunks';
-import { buildArc, type Chime } from './chimes';
+import type { Chime } from './chimes';
 import { resolveObstacle, type Obstacle } from './obstacles';
-import { resolveRail, type Rail } from './rails';
+import { resolveLedge, type Solid } from './solids';
 
 interface ResolvedChunk {
   chimes: Chime[];
   obstacles: Obstacle[];
-  rails: Rail[];
+  solids: Solid[];
 }
 
 /** Chunks either side of the player to keep resolved. */
@@ -37,7 +37,7 @@ export class World {
   /** Reused scratch arrays; queries run every frame and must not allocate. */
   private readonly chimeScratch: Chime[] = [];
   private readonly obstacleScratch: Obstacle[] = [];
-  private readonly railScratch: Rail[] = [];
+  private readonly solidScratch: Solid[] = [];
 
   constructor(rng: Rng) {
     this.terrain = new Terrain(rng, 0);
@@ -123,16 +123,16 @@ export class World {
     return this.obstacleScratch;
   }
 
-  /** Rails overlapping a window. Returns a reused array — iterate immediately. */
-  railsNear(x: number, reach = MAX_SPAWN_REACH): readonly Rail[] {
-    this.railScratch.length = 0;
+  /** Solids overlapping a window. Returns a reused array — iterate immediately. */
+  solidsNear(x: number, reach = MAX_SPAWN_REACH): readonly Solid[] {
+    this.solidScratch.length = 0;
     for (const chunk of this.chunksSpanning(x, reach)) {
-      for (const rail of chunk.rails) {
-        if (rail.x2 < x - reach || rail.x1 > x + reach) continue;
-        this.railScratch.push(rail);
+      for (const solid of chunk.solids) {
+        if (solid.x + solid.width / 2 < x - reach || solid.x - solid.width / 2 > x + reach) continue;
+        this.solidScratch.push(solid);
       }
     }
-    return this.railScratch;
+    return this.solidScratch;
   }
 
   /** Drops distant resolved chunks and prunes the terrain's own cache. */
@@ -163,7 +163,7 @@ export class World {
 
     // Specs owned by this chunk, regardless of where their anchor landed. Neighbours are
     // resolved in their own turn.
-    const resolved: ResolvedChunk = { chimes: [], obstacles: [], rails: [] };
+    const resolved: ResolvedChunk = { chimes: [], obstacles: [], solids: [] };
     for (const spec of this.terrain.chunkSpawns(index)) {
       this.resolveInto(resolved, spec, index);
     }
@@ -175,17 +175,19 @@ export class World {
   private resolveInto(target: ResolvedChunk, spec: SpawnSpec, index: number): void {
     switch (spec.kind) {
       case 'chimeArc':
-        target.chimes.push(...buildArc(this.terrain, spec, index));
+        // Suspended: arcs were derived from the runner's auto-cruise/auto-launch model,
+        // which the platformer pivot removed (see player.ts). Re-derived in a later
+        // milestone against real player-controlled movement — see the pivot plan.
         break;
       case 'obstacle': {
         // Rejected on uphill ground — see resolveObstacle. Not every spec becomes
-        // an entity, the same as a chime arc with no standable launch point.
+        // an entity, the same as a ledge with nowhere sensible to sit.
         const obstacle = resolveObstacle(this.terrain, spec, index);
         if (obstacle) target.obstacles.push(obstacle);
         break;
       }
-      case 'rail':
-        target.rails.push(resolveRail(this.terrain, spec, index));
+      case 'ledge':
+        target.solids.push(resolveLedge(this.terrain, spec, index));
         break;
     }
   }

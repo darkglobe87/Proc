@@ -26,11 +26,12 @@ function makeCtx(seed = 1): TwistRuntimeContext {
 
 function makeInput(overrides: Partial<InputSnapshot> = {}): InputSnapshot {
   return {
+    moveAxis: 0,
     jumpPressed: false,
     jumpReleased: false,
     jumpHeld: false,
     holdSeconds: 0,
-    divePressed: false,
+    interactPressed: false,
     pausePressed: false,
     restartPressed: false,
     pointerX: 0,
@@ -49,14 +50,16 @@ describe('createInversionTwist', () => {
 });
 
 describe('createMirrorTwist', () => {
-  it('mirrors rendering and reverses trick spin', () => {
+  it('mirrors rendering and touches no physics', () => {
     const twist = createMirrorTwist();
     expect(twist.render?.(DEFAULT_RENDER_MODIFIERS)).toEqual({ rotation: 0, mirrorX: true });
-    expect(twist.physics?.(DEFAULT_MODIFIERS)).toEqual({
-      gravityScale: 1,
-      windAccel: 0,
-      spinSign: -1,
-    });
+    expect(twist.physics).toBeUndefined();
+  });
+
+  it('reverses the move-pad axis', () => {
+    const twist = createMirrorTwist();
+    expect(twist.transformInput?.(makeInput({ moveAxis: 1 }), DT).moveAxis).toBe(-1);
+    expect(twist.transformInput?.(makeInput({ moveAxis: -1 }), DT).moveAxis).toBe(1);
   });
 
   it('toggles rather than forcing, so stacking with itself would cancel out', () => {
@@ -74,7 +77,6 @@ describe('createMoonwalkTwist', () => {
     expect(result?.gravityScale).toBeLessThan(1);
     expect(result?.gravityScale).toBeGreaterThan(0);
     expect(result?.windAccel).toBe(0);
-    expect(result?.spinSign).toBe(1);
   });
 });
 
@@ -233,16 +235,18 @@ describe('createEchoTwist', () => {
 
   it('collects chimes near the ghost through the shared collectChime hook', () => {
     const twist = createEchoTwist();
-    const ctx = makeCtx();
+    // Chime placement is suspended pending its re-derivation against the platformer's
+    // jump model (see world/chimes.ts), so the real World never has any to find right
+    // now — a fake `world` standing in for just the one method Echo actually calls
+    // keeps this test exercising the collision maths regardless.
+    const chime = { id: 1, x: 500, y: 200, pitch: 0, index: 0, total: 1 };
+    const fakeWorld = { chimesNear: () => [chime] } as unknown as ReturnType<typeof makeCtx>['world'];
     const collectChime = vi.fn();
-    twist.onActivate?.({ ...ctx, collectChime });
+    const ctx = { ...makeCtx(), world: fakeWorld, collectChime };
+    twist.onActivate?.(ctx);
 
-    // Park the player directly on top of a real chime the world actually generated, then
-    // hold still long enough for the ghost to catch up to that exact spot.
-    const chime = [...ctx.world.chimesNear(6_000, 1_500)][0];
-    expect(chime).toBeDefined();
-    if (!chime) return;
-
+    // Park the player directly on top of the chime, then hold still long enough for
+    // the ghost to catch up to that exact spot.
     const steps = Math.round(3.2 / DT);
     for (let i = 0; i < steps; i++) {
       ctx.player.x = chime.x;

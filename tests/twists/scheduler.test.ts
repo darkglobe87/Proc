@@ -251,7 +251,6 @@ describe('TwistScheduler', () => {
     expect(scheduler.computePhysicsModifiers()).toEqual({
       gravityScale: 1,
       windAccel: 0,
-      spinSign: 1,
     });
   });
 
@@ -260,7 +259,6 @@ describe('TwistScheduler', () => {
     expect(scheduler.computePhysicsModifiers()).toEqual({
       gravityScale: 1,
       windAccel: 0,
-      spinSign: 1,
     });
     expect(scheduler.computeRenderModifiers()).toEqual({ rotation: 0, mirrorX: false });
   });
@@ -268,11 +266,12 @@ describe('TwistScheduler', () => {
   it('passes input through unchanged when no active twist transforms it', () => {
     const scheduler = new TwistScheduler(new Rng(14), [stub('inversion', 'Inversion')]);
     const input = {
+      moveAxis: 0,
       jumpPressed: true,
       jumpReleased: false,
       jumpHeld: true,
       holdSeconds: 0.1,
-      divePressed: false,
+      interactPressed: false,
       pausePressed: false,
       restartPressed: false,
       pointerX: 0,

@@ -9,11 +9,11 @@ import {
   hitsObstacle,
   resolveObstacle,
 } from '../src/world/obstacles';
-import { railCrossing, railYAt, resolveRail } from '../src/world/rails';
+import { groundFollowAt, resolveLedge } from '../src/world/solids';
 
 describe('spawn generation', () => {
   it('is identical regardless of the order chunks are visited', () => {
-    // The Rewind property, now covering hazards and rails as well as terrain features.
+    // The Rewind property, now covering hazards and ledges as well as terrain features.
     const forward = new ChunkField(new Rng(4242));
     for (let i = 0; i <= 8; i++) forward.chunk(i);
 
@@ -179,43 +179,39 @@ describe('obstacle collision', () => {
   });
 });
 
-describe('rails', () => {
+describe('ledges', () => {
   const world = new World(new Rng(5));
-  const rail = resolveRail(
+  const ledge = resolveLedge(
     world.terrain,
-    { kind: 'rail', slot: 0, x: 2_000, length: 240, clearance: 60, tilt: 0.05 },
+    { kind: 'ledge', slot: 0, x: 2_000, width: 180, clearance: 60, thickness: 12 },
     2,
   );
 
-  it('floats above the ground at its start', () => {
-    expect(rail.y1).toBeLessThan(world.terrain.heightAt(rail.x1));
+  it('floats above the ground beneath its centre', () => {
+    expect(ledge.y - ledge.height).toBeLessThan(world.terrain.heightAt(ledge.x));
   });
 
-  it('interpolates y across its span and rejects x outside it', () => {
-    expect(railYAt(rail, rail.x1)).toBeCloseTo(rail.y1, 6);
-    expect(railYAt(rail, rail.x2)).toBeCloseTo(rail.y2, 6);
-    expect(railYAt(rail, rail.x1 - 1)).toBeNull();
-    expect(railYAt(rail, rail.x2 + 1)).toBeNull();
+  it('is exactly `clearance` above the ground at its centre', () => {
+    expect(world.terrain.heightAt(ledge.x) - (ledge.y - ledge.height)).toBeCloseTo(60, 6);
   });
 
-  it('catches a descending player crossing from above', () => {
-    const midX = (rail.x1 + rail.x2) / 2;
-    const railY = railYAt(rail, midX) as number;
-    const crossing = railCrossing(rail, midX - 5, railY - 20, midX, railY + 5);
-    expect(crossing).not.toBeNull();
+  it('supports a body standing on top of it, once within tolerance', () => {
+    const onTop = groundFollowAt([ledge], ledge.x, 9, ledge.y - ledge.height, 999_999);
+    expect(onTop.grounded).toBe(true);
+    expect(onTop.y).toBeCloseTo(ledge.y - ledge.height, 6);
   });
 
-  it('ignores a player rising underneath it', () => {
-    // Otherwise running along below a rail would snap you up onto it.
-    const midX = (rail.x1 + rail.x2) / 2;
-    const railY = railYAt(rail, midX) as number;
-    expect(railCrossing(rail, midX - 5, railY + 30, midX, railY + 10)).toBeNull();
+  it('does not support a body far below it — the terrain wins instead', () => {
+    const terrainHeight = world.terrain.heightAt(ledge.x);
+    const onGround = groundFollowAt([ledge], ledge.x, 9, terrainHeight, terrainHeight);
+    expect(onGround.grounded).toBe(true);
+    expect(onGround.y).toBeCloseTo(terrainHeight, 6);
   });
 
-  it('ignores a player still above it', () => {
-    const midX = (rail.x1 + rail.x2) / 2;
-    const railY = railYAt(rail, midX) as number;
-    expect(railCrossing(rail, midX - 5, railY - 60, midX, railY - 40)).toBeNull();
+  it('does not support a body outside its horizontal span', () => {
+    const past = ledge.x + ledge.width;
+    const result = groundFollowAt([ledge], past, 9, ledge.y - ledge.height, 999_999);
+    expect(result.grounded).toBe(false);
   });
 });
 
@@ -264,7 +260,7 @@ describe('World caching', () => {
     expect(world.residentCount).toBeLessThan(20);
   });
 
-  it('resolves obstacles and rails identically after eviction', () => {
+  it('resolves obstacles and ledges identically after eviction', () => {
     const world = new World(new Rng(88));
     const key = (x: number): string =>
       [...world.obstaclesNear(x, 1_500)]

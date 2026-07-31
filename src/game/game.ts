@@ -26,24 +26,19 @@ import { ANCHOR_X } from './camera';
 import { Camera } from './camera';
 import { World } from '../world/world';
 import { CHIME_RADIUS, type Chime } from '../world/chimes';
-import { distanceToObstacle } from '../world/obstacles';
-import { railYAt } from '../world/rails';
 import { Player, PLAYER_RADIUS } from '../player/player';
-import { Flow } from './flow';
 import { drawHud } from '../ui/hud';
 import type { GameEvents } from './events';
 import { TELEGRAPH_SECONDS, TwistScheduler, type SchedulerHooks } from '../twists/scheduler';
 import { createTwistRegistry } from '../twists/registry';
 
-export type GameState = 'ready' | 'running' | 'dead';
+export type GameState = 'ready' | 'exploring';
 
 /** World pixels per displayed metre. */
 const PIXELS_PER_METRE = 10;
-/** Ignore restart taps for this long after a crash, so the fatal tap does not restart. */
-const DEATH_COOLDOWN = 0.6;
 /** Horizontal sample spacing when tessellating a dune band, in screen pixels. */
 const BAND_STEP = 12;
-const TRAIL_LENGTH = 22;
+const TRAIL_LENGTH = 18;
 
 interface BandSpec {
   role: 'terrainFar' | 'terrainMid' | 'terrainNear';
@@ -93,28 +88,19 @@ export class Game {
   private readonly camera = new Camera();
   private readonly world: World;
   private readonly player: Player;
-  private readonly flow = new Flow();
   private readonly twists: TwistScheduler;
   /** Reused every frame rather than allocated — see SchedulerHooks. */
   private readonly twistHooks: SchedulerHooks;
 
   private state: GameState = 'ready';
   private time = 0;
-  private deathAt = -Infinity;
-  private best: number;
-  private bestChimes: number;
-  private bestFlow: number;
-  private currentFlips = 0;
+  private furthest: number;
   private chimes = 0;
-  private score = 0;
   private paused = false;
 
   /** Telegraph banner state, driven by the 'twist:telegraph' event. */
   private telegraphLabels: readonly string[] = [];
   private telegraphTimer = 0;
-
-  /** Obstacles already credited as a near-miss, so one cannot be scored repeatedly. */
-  private readonly nearMissed = new Set<number>();
 
   private readonly trail: number[] = [];
   private overBudgetSeconds = 0;
@@ -143,29 +129,17 @@ export class Game {
       collectChime: (chime) => this.collectOne(chime),
     };
 
-    this.best = storage.load<number>('best.distance', 0);
-    this.bestChimes = storage.load<number>('best.chimes', 0);
-    this.bestFlow = storage.load<number>('best.flow', 1);
+    this.furthest = storage.load<number>('furthest.distance', 0);
 
     this.input.attach(viewport.canvas);
     this.camera.snap();
 
-    this.bus.on('player:trick', ({ flips }) => {
-      this.currentFlips = flips;
-    });
-    this.bus.on('player:launch', () => {
-      this.currentFlips = 0;
-    });
-    // Flow reacts to what the player did, rather than the player knowing about scoring.
-    this.bus.on('player:land', ({ quality, flips }) => {
-      if (quality === 'clean') this.flow.cleanLanding(flips);
-      else if (quality === 'sloppy') this.flow.sloppyLanding();
-    });
-    this.bus.on('player:nearMiss', () => this.flow.nearMiss());
     this.bus.on('twist:telegraph', ({ labels }) => {
       this.telegraphLabels = labels;
       this.telegraphTimer = TELEGRAPH_SECONDS;
     });
+
+    if (this.options.noHazards) this.world.suppressHazards('dev-nohazards', -Infinity, Infinity);
 
     this.loop = new GameLoop({
       update: (dt) => this.update(dt),
@@ -191,40 +165,30 @@ export class Game {
       return;
     }
 
-    switch (this.state) {
-      case 'ready':
-        if (input.jumpPressed) this.beginRun();
-        break;
-
-      case 'running': {
-        // Computed before the physics step, so a Shift's rules are what the player's
-        // own input and movement are actually evaluated against this frame.
-        const modifiers = this.twists.computePhysicsModifiers();
-        const effectiveInput = this.twists.transformInput(input, dt);
-        this.player.update(dt, effectiveInput, this.bus, modifiers);
-
-        this.collectChimes();
-        this.creditNearMisses();
-        if (this.player.isGrinding) this.flow.grinding(dt);
-        this.flow.update(dt);
-
-        // After the physics step: Echo records this frame's post-move position, and the
-        // telegraph/grace/pairing state machine advances.
-        this.twists.update(dt, this.twistHooks);
-        if (this.telegraphTimer > 0) this.telegraphTimer = Math.max(0, this.telegraphTimer - dt);
-
-        if (this.player.dead) this.endRun();
-        break;
-      }
-
-      case 'dead':
-        if (input.jumpPressed && this.time - this.deathAt > DEATH_COOLDOWN) {
-          this.beginRun();
-        }
-        break;
+    if (this.state === 'ready') {
+      if (input.jumpPressed || input.moveAxis !== 0) this.state = 'exploring';
     }
 
-    this.camera.follow(this.player.x, this.player.y, this.player.speedRatio, dt);
+    if (this.state === 'exploring') {
+      // Computed before the physics step, so a region's laws are what the player's own
+      // input and movement are actually evaluated against this frame.
+      const modifiers = this.twists.computePhysicsModifiers();
+      const effectiveInput = this.twists.transformInput(input, dt);
+      this.player.update(dt, effectiveInput, this.bus, modifiers);
+
+      this.collectChimes();
+      this.twists.update(dt, this.twistHooks);
+      if (this.telegraphTimer > 0) this.telegraphTimer = Math.max(0, this.telegraphTimer - dt);
+
+      if (this.player.distance > this.furthest) {
+        this.furthest = this.player.distance;
+        storage.save('furthest.distance', Math.floor(this.furthest));
+      }
+
+      if (input.restartPressed) this.player.reset();
+    }
+
+    this.camera.follow(this.player.x, this.player.y, this.player.facing, dt);
     this.world.prune(this.player.x);
 
     this.input.endStep();
@@ -241,89 +205,14 @@ export class Game {
   }
 
   /**
-   * The real scoring path for a single pickup — count, score, flow, event. Exposed to
-   * twists via `SchedulerHooks.collectChime` so a twist that awards a chime on the
-   * player's behalf (Echo's ghost) cannot silently diverge from how a live pickup
-   * is scored; it goes through the exact same accounting.
+   * The real collection path for a single pickup. Exposed to twists via
+   * `SchedulerHooks.collectChime` so a twist that awards a chime on the player's
+   * behalf (Echo's ghost) cannot silently diverge from how a live pickup is counted.
    */
   private collectOne(chime: Chime): void {
     if (!this.world.collect(chime)) return;
-
     this.chimes++;
-    const value = this.flow.valueOfChime();
-    this.score += value;
-    this.flow.chime();
-    this.bus.emit('chime:collect', {
-      pitch: chime.pitch,
-      index: chime.index,
-      total: chime.total,
-      value,
-    });
-  }
-
-  /**
-   * Credits a near-miss once the player is safely past a hazard.
-   *
-   * Scored on the way out, not on approach: crediting while still alongside would pay out
-   * for a pass that is about to become a collision.
-   */
-  private creditNearMisses(): void {
-    const bodyY = this.player.y - PLAYER_RADIUS;
-    for (const obstacle of this.world.obstaclesNear(this.player.x, 120)) {
-      if (this.nearMissed.has(obstacle.id)) continue;
-      // Already behind the player, and it was close.
-      if (obstacle.x > this.player.x - obstacle.width) continue;
-      const distance = distanceToObstacle(obstacle, this.player.x, bodyY);
-      if (distance > 34) continue;
-      this.nearMissed.add(obstacle.id);
-      this.bus.emit('player:nearMiss', { obstacle: obstacle.id, distance });
-    }
-  }
-
-  private beginRun(): void {
-    this.player.reset();
-    this.world.reset();
-    this.flow.reset();
-    this.twists.reset();
-    this.nearMissed.clear();
-    this.trail.length = 0;
-    this.currentFlips = 0;
-    this.chimes = 0;
-    this.score = 0;
-    this.telegraphLabels = [];
-    this.telegraphTimer = 0;
-    this.camera.rotation = 0;
-    this.camera.mirrorX = false;
-    // Applied after twists.reset() and world.reset(), so a dev-mode run always opens
-    // hazard-free regardless of what the previous run's twists left suppressed.
-    // A distinct key from the twist scheduler's own grace-window suppression (see
-    // World), so the two coexist independently — the grace window's teardown must
-    // never accidentally cancel this permanent, run-long dev override, or vice versa.
-    if (this.options.noHazards) this.world.suppressHazards('dev-nohazards', -Infinity, Infinity);
-    this.camera.snap();
-    this.state = 'running';
-    this.bus.emit('run:start', { seed: this.options.seed });
-  }
-
-  private endRun(): void {
-    this.state = 'dead';
-    this.deathAt = this.time;
-
-    const isBest = this.player.distance > this.best;
-    if (isBest) {
-      this.best = this.player.distance;
-      storage.save('best.distance', Math.floor(this.best));
-    }
-    if (this.chimes > this.bestChimes) {
-      this.bestChimes = this.chimes;
-      storage.save('best.chimes', this.chimes);
-    }
-    if (this.flow.peakMultiplier > this.bestFlow) {
-      this.bestFlow = this.flow.peakMultiplier;
-      storage.save('best.flow', Number(this.bestFlow.toFixed(2)));
-    }
-
-    this.bus.emit('run:end', { distance: this.player.distance, best: isBest });
+    this.bus.emit('chime:collect', { pitch: chime.pitch, index: chime.index, total: chime.total });
   }
 
   private render(alpha: number): void {
@@ -342,7 +231,7 @@ export class Game {
     this.builder.begin(this.camera, this.time);
 
     for (const band of BANDS) this.emitBand(band, width, height);
-    this.emitRails(width);
+    this.emitSolids(width);
     this.emitObstacles(width);
     this.emitChimes(width);
     this.emitTrail(drawX, drawY);
@@ -352,18 +241,15 @@ export class Game {
     drawHud(
       this.builder,
       {
-        distanceMetres: Math.floor(this.player.distance / PIXELS_PER_METRE),
-        bestMetres: Math.floor(this.best / PIXELS_PER_METRE),
+        // Current position, not the peak — you can walk back the way you came, and
+        // the readout should say where you are, not just the furthest you got to.
+        distanceMetres: Math.floor(this.player.x / PIXELS_PER_METRE),
+        furthestMetres: Math.floor(this.furthest / PIXELS_PER_METRE),
         seedCode: encodeSeed(this.options.seed),
         isDaily: this.options.isDaily,
         state: this.state,
-        flips: this.currentFlips,
         chimes: this.chimes,
-        bestChimes: this.bestChimes,
-        score: this.score,
-        flow: this.flow.multiplier,
-        flowIdle: this.flow.idleFraction,
-        grinding: this.player.isGrinding,
+        hurt: this.player.isHurt,
         activeTwists: this.twists.activeLabels,
         telegraphLabels: this.telegraphTimer > 0 ? this.telegraphLabels : [],
         fps: this.loop.fps,
@@ -409,11 +295,6 @@ export class Game {
     this.builder.end();
   }
 
-  /**
-   * The trail is emitted as one short polyline per segment rather than a single path,
-   * so width and alpha can taper along it. A uniform polyline reads as a rigid stick
-   * welded to the player; the taper is what makes it look like a ribbon left behind.
-   */
   /**
    * Chimes, with a gentle breathing pulse so they read as alive rather than as UI.
    * Animated from `scene.time`, never from frame count, so it looks the same at any
@@ -461,31 +342,42 @@ export class Game {
     }
   }
 
-  private emitRails(width: number): void {
+  /**
+   * One-way ledges as a solid plank with two support struts down to the dune beneath —
+   * the struts are what sell "floating over" rather than "resting on".
+   */
+  private emitSolids(width: number): void {
     const { left, right } = this.worldBounds(width);
-    for (const rail of this.world.railsNear(this.camera.x, (right - left) / 2 + 200)) {
-      if (rail.x2 < left || rail.x1 > right) continue;
+    for (const solid of this.world.solidsNear(this.camera.x, (right - left) / 2 + 200)) {
+      const solidLeft = solid.x - solid.width / 2;
+      const solidRight = solid.x + solid.width / 2;
+      if (solidRight < left || solidLeft > right) continue;
+      const solidTop = solid.y - solid.height;
 
-      // Supports first, so the rail line draws over them.
-      for (const t of [0.15, 0.85]) {
-        const x = rail.x1 + (rail.x2 - rail.x1) * t;
-        const y = railYAt(rail, x);
-        if (y === null) continue;
-        this.builder.polyline('hazard', 'entities', 3, 0.85);
-        this.builder.point(x, y);
-        this.builder.point(x, this.world.terrain.heightAt(x));
+      for (const t of [0.18, 0.82]) {
+        const sx = solidLeft + solid.width * t;
+        this.builder.polyline('hazard', 'entities', 3, 0.6);
+        this.builder.point(sx, solid.y);
+        this.builder.point(sx, this.world.terrain.heightAt(sx));
         this.builder.end();
       }
 
-      this.builder.polyline('accent', 'entities', 3, 0.9);
-      this.builder.point(rail.x1, rail.y1);
-      this.builder.point(rail.x2, rail.y2);
+      this.builder.polygon('terrainNear', 'entities');
+      this.builder.point(solidLeft, solidTop);
+      this.builder.point(solidRight, solidTop);
+      this.builder.point(solidRight, solid.y);
+      this.builder.point(solidLeft, solid.y);
+      this.builder.end();
+
+      this.builder.polyline('accent', 'entities', 2, 0.9);
+      this.builder.point(solidLeft, solidTop);
+      this.builder.point(solidRight, solidTop);
       this.builder.end();
     }
   }
 
   private emitTrail(x: number, y: number): void {
-    if (this.state === 'running') {
+    if (this.state === 'exploring') {
       this.trail.push(x, y);
       while (this.trail.length > TRAIL_LENGTH * 2) this.trail.splice(0, 2);
     }
@@ -495,45 +387,59 @@ export class Game {
     for (let i = 1; i < points; i++) {
       // 0 at the oldest point, 1 at the player.
       const t = i / (points - 1);
-      this.builder.polyline('trail', 'fx', 0.6 + t * 3, t * t * 0.5);
+      this.builder.polyline('trail', 'fx', 0.6 + t * 2, t * t * 0.35);
       this.builder.point(this.trail[(i - 1) * 2] as number, this.trail[(i - 1) * 2 + 1] as number);
       this.builder.point(this.trail[i * 2] as number, this.trail[i * 2 + 1] as number);
       this.builder.end();
     }
   }
 
+  /**
+   * A small upright silhouette: a body and a head, plus a short "nose" in the facing
+   * direction so which way the player is walking reads at a glance even at a glance's
+   * distance, where a symmetric shape would not.
+   */
   private emitPlayer(x: number, y: number): void {
     const rotation = this.player.rotation;
     const cos = Math.cos(rotation);
     const sin = Math.sin(rotation);
+    const alpha = this.player.isHurt && Math.floor(this.time * 10) % 2 === 0 ? 0.35 : 1;
 
-    // Board and rider as two simple shapes. The rotation has to be legible — it is the
-    // difference between a landed flip and a crash, so the player must be able to read
-    // their own angle at a glance.
-    const halfLength = 17;
-    const thickness = 4;
+    const halfWidth = 9;
+    const bodyHeight = 30;
 
     const corners: ReadonlyArray<readonly [number, number]> = [
-      [-halfLength, -thickness],
-      [halfLength, -thickness],
-      [halfLength, thickness],
-      [-halfLength, thickness],
+      [-halfWidth, -bodyHeight],
+      [halfWidth, -bodyHeight],
+      [halfWidth, 0],
+      [-halfWidth, 0],
     ];
 
-    this.builder.polygon('player', 'entities');
+    this.builder.polygon('player', 'entities', alpha);
     for (const [lx, ly] of corners) {
       this.builder.point(x + lx * cos - ly * sin, y + lx * sin + ly * cos);
     }
     this.builder.end();
 
-    // Rider sits above the board along its local normal, so it orbits during a flip.
-    const riderLocalY = -(PLAYER_RADIUS + 6);
+    const headLocalY = -(bodyHeight + 7);
     this.builder.disc(
       'player',
       'entities',
-      x - riderLocalY * sin,
-      y + riderLocalY * cos,
+      x - headLocalY * sin,
+      y + headLocalY * cos,
       PLAYER_RADIUS,
+      alpha,
+    );
+
+    const noseLocalX = this.player.facing * (halfWidth + 5);
+    const noseLocalY = -bodyHeight * 0.28;
+    this.builder.disc(
+      'accent',
+      'entities',
+      x + noseLocalX * cos - noseLocalY * sin,
+      y + noseLocalX * sin + noseLocalY * cos,
+      3,
+      alpha,
     );
   }
 

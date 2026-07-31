@@ -1,16 +1,19 @@
 /**
- * Mirror — the world runs right-to-left, and tricks spin backwards.
+ * Mirror — the world runs right-to-left, and your own controls follow it.
  *
  * A literal "run backwards through the world" was considered and rejected: obstacle
  * fairness (no hazard in a ramp's landing zone, minimum spacing) is only proven for
  * left-to-right travel, and re-deriving it symmetrically for the reverse direction
  * is a second fairness system, not a twist. Flipping the *rendering* horizontally
- * instead is free of that risk — collision, scoring and distance are all completely
+ * instead is free of that risk — collision and placement are all completely
  * unaffected — while still being disorienting: everything you see runs the opposite
- * way to how it has for the rest of the run.
+ * way to how it has for the rest of the exploration.
  *
- * The trick-spin reversal is the one piece of genuine control inversion available in
- * a one-button game with no left/right input: a held flip now rotates the other way.
+ * Now that movement is the player's own choice rather than an auto-cruise, Mirror has
+ * a much better version of the joke available than the old trick-spin reversal: it
+ * flips `moveAxis` itself, so the pad you have been steering with all game now steers
+ * backwards. Nothing about jumping or collision cares which way `moveAxis` points, so
+ * this is a pure input transform with no physics-side special case.
  */
 
 import type { Twist } from './types';
@@ -20,7 +23,7 @@ export function createMirrorTwist(): Twist {
     id: 'mirror',
     label: 'Mirror',
     conflicts: [],
-    physics: (base) => ({ ...base, spinSign: -base.spinSign }),
+    transformInput: (input) => ({ ...input, moveAxis: -input.moveAxis }),
     render: (base) => ({ ...base, mirrorX: !base.mirrorX }),
   };
 }
