@@ -174,7 +174,7 @@ export class RegionDirector {
     ) {
       // Grace ran out while still standing in the graced region: the law applies for real now.
       this.grace = null;
-      this.applyLaw(region, hooks);
+      this.applyLaw(hooks, region.law);
     }
 
     const facing = hooks.player.facing || 1;
@@ -211,15 +211,17 @@ export class RegionDirector {
     if (rejectionCount > 0 && region.law.length > 0) {
       // Already fought this region's law at least once: grant an escalating,
       // unopposed window before it engages again, rather than refighting an
-      // unwinnable rematch — see GRACE_BASE_SECONDS.
-      this.active = [];
+      // unwinnable rematch — see GRACE_BASE_SECONDS. Still routed through
+      // applyLaw (with an empty law) so whatever was active before this still
+      // gets its onDeactivate — the previous region's twists don't just vanish.
       this.grace = {
         regionIndex: region.index,
         until: this.clock + GRACE_BASE_SECONDS * 2 ** (rejectionCount - 1),
       };
+      this.applyLaw(hooks, []);
     } else {
       this.grace = null;
-      this.applyLaw(region, hooks);
+      this.applyLaw(hooks, region.law);
     }
 
     hooks.bus.emit('region:enter', {
@@ -229,8 +231,13 @@ export class RegionDirector {
     });
   }
 
-  /** Activates `region`'s real law, deactivating whatever was active before. */
-  private applyLaw(region: Region, hooks: DirectorHooks): void {
+  /**
+   * Deactivates whatever is currently active and activates `law` instead. Takes
+   * the law explicitly (rather than always reading the current region's) so a
+   * graced entry can activate an empty set without lying about what the
+   * region's real law is.
+   */
+  private applyLaw(hooks: DirectorHooks, law: readonly TwistId[]): void {
     const ctx: TwistRuntimeContext = {
       player: hooks.player,
       world: hooks.world,
@@ -238,7 +245,7 @@ export class RegionDirector {
       collectChime: hooks.collectChime,
     };
     for (const twist of this.active) twist.onDeactivate?.();
-    this.active = region.law.map((id) => this.byId(id));
+    this.active = law.map((id) => this.byId(id));
     for (const twist of this.active) twist.onActivate?.(ctx);
   }
 
