@@ -3,16 +3,22 @@ import { Rng } from '../src/core/rng';
 import { World } from '../src/world/world';
 import { CHUNK_WIDTH, ChunkField, chunkIndexAt } from '../src/world/chunks';
 import type { DecorSpec } from '../src/world/chunks';
+import { RegionField } from '../src/world/regions';
 import { resolveDecor } from '../src/world/decor';
 import { groundFollowAt, resolveLedge } from '../src/world/solids';
+
+/** A ChunkField with its own matching RegionField, for tests that exercise it directly. */
+function chunkField(seed: number): ChunkField {
+  return new ChunkField(new Rng(seed), new RegionField(new Rng(seed)));
+}
 
 describe('spawn generation', () => {
   it('is identical regardless of the order chunks are visited', () => {
     // The Rewind property, now covering decor and ledges as well as terrain features.
-    const forward = new ChunkField(new Rng(4242));
+    const forward = chunkField(4242);
     for (let i = 0; i <= 8; i++) forward.chunk(i);
 
-    const backward = new ChunkField(new Rng(4242));
+    const backward = chunkField(4242);
     for (let i = 8; i >= 0; i--) backward.chunk(i);
 
     for (let i = 0; i <= 8; i++) {
@@ -21,7 +27,7 @@ describe('spawn generation', () => {
   });
 
   it('regenerates an evicted chunk identically', () => {
-    const field = new ChunkField(new Rng(7));
+    const field = chunkField(7);
     const original = structuredClone(field.chunk(6).spawns);
     field.prune(1_000_000);
     expect(field.chunk(6).spawns).toEqual(original);
@@ -29,7 +35,7 @@ describe('spawn generation', () => {
 
   it('leaves the opening chunk completely empty', () => {
     // A run must never start next to scenery the player has not had time to see.
-    const field = new ChunkField(new Rng(3));
+    const field = chunkField(3);
     expect(field.chunk(0).spawns).toEqual([]);
     expect(field.chunk(0).features).toEqual([]);
   });
@@ -38,7 +44,7 @@ describe('spawn generation', () => {
 describe('decor placement', () => {
   it('places at least one piece of scenery per chunk', () => {
     for (const seed of [1, 5, 42, 777, 31337]) {
-      const field = new ChunkField(new Rng(seed));
+      const field = chunkField(seed);
       for (let index = 1; index < 20; index++) {
         const count = field.chunk(index).spawns.filter((spec) => spec.kind === 'decor').length;
         expect(count, `seed ${seed} chunk ${index}`).toBeGreaterThan(0);
@@ -48,7 +54,7 @@ describe('decor placement', () => {
 
   it('keeps decor spaced apart within a chunk', () => {
     for (const seed of [2, 9, 64, 2024]) {
-      const field = new ChunkField(new Rng(seed));
+      const field = chunkField(seed);
       for (let index = 1; index < 40; index++) {
         const xs = field
           .chunk(index)
@@ -63,7 +69,7 @@ describe('decor placement', () => {
   });
 
   it('stays inside its own chunk', () => {
-    const field = new ChunkField(new Rng(11));
+    const field = chunkField(11);
     for (let index = 1; index < 30; index++) {
       for (const spec of field.chunk(index).spawns) {
         if (spec.kind !== 'decor') continue;

@@ -10,6 +10,7 @@
  */
 
 import type { Rng } from '../core/rng';
+import type { RegionField, RegionKind } from './regions';
 
 export type FeatureKind = 'crest' | 'pit' | 'ramp' | 'plateau';
 
@@ -51,14 +52,20 @@ export interface ChimeArcSpec {
   count: number;
 }
 
-/** A decorative silhouette — a rock, a spire, a ruined pillar. Purely scenery. */
+/**
+ * A decorative silhouette. Purely scenery — see `world/decor.ts`.
+ *
+ * `variant` selects the shape and belongs entirely to the renderer, except for one
+ * fact generation does need to know: 0-3 are natural shapes (boulder, spire, ruin,
+ * cluster) and 4-5 are built ones (hut, tower), so a chunk in a settlement region
+ * draws from the second range instead of the first.
+ */
 export interface DecorSpec {
   kind: 'decor';
   slot: number;
   x: number;
   width: number;
   height: number;
-  /** Selects the silhouette shape; interpretation belongs to the renderer. */
   variant: number;
 }
 
@@ -121,6 +128,23 @@ const SPECS: readonly FeatureSpec[] = [
   { kind: 'pit', weight: 1.5, minWidth: 180, maxWidth: 320, minAmplitude: 34, maxAmplitude: 74 },
 ];
 
+/**
+ * A settlement wants calm, buildable ground, not dunes: mostly flat plateau, with
+ * crests, ramps and pits heavily de-weighted rather than removed outright — a
+ * completely flat town would look like a generation bug, not a choice.
+ */
+const SETTLEMENT_SPECS: readonly FeatureSpec[] = [
+  { kind: 'plateau', weight: 6, minWidth: 300, maxWidth: 500, minAmplitude: 18, maxAmplitude: 36 },
+  { kind: 'crest', weight: 1, minWidth: 240, maxWidth: 420, minAmplitude: 40, maxAmplitude: 90 },
+  { kind: 'ramp', weight: 0.5, minWidth: 220, maxWidth: 330, minAmplitude: 45, maxAmplitude: 95 },
+  { kind: 'pit', weight: 0.3, minWidth: 180, maxWidth: 320, minAmplitude: 34, maxAmplitude: 74 },
+];
+
+/** Natural decor variants — see `DecorSpec`. */
+const NATURAL_DECOR_VARIANTS = 4;
+/** Built decor variants, immediately following the natural range. */
+const SETTLEMENT_DECOR_VARIANTS = 2;
+
 export function chunkIndexAt(x: number): number {
   return Math.floor(x / CHUNK_WIDTH);
 }
@@ -129,7 +153,10 @@ export class ChunkField {
   private readonly cache = new Map<number, Chunk>();
   private readonly scratch: Feature[] = [];
 
-  constructor(private readonly rng: Rng) {}
+  constructor(
+    private readonly rng: Rng,
+    private readonly regions: RegionField,
+  ) {}
 
   /** The chunk at `index`, generating and memoising it on first request. */
   chunk(index: number): Chunk {
@@ -209,6 +236,11 @@ export class ChunkField {
     // Keyed by index alone — this is what makes regeneration reproducible.
     const rng = this.rng.fork(`chunk:${index}`);
     const start = index * CHUNK_WIDTH;
+    // By the chunk's start x, not its centre or span: a chunk that straddles a
+    // region boundary belongs wholly to whichever side it started on, the same
+    // ownership rule `Terrain.chunkSpawns` already uses for specs.
+    const region = this.regions.regionAt(start);
+    const specs = region.kind === 'settlement' ? SETTLEMENT_SPECS : SPECS;
 
     const count = rng.int(1, 4);
     // Lay features out in non-overlapping slots so their deformations sum cleanly
@@ -216,7 +248,7 @@ export class ChunkField {
     const slotWidth = CHUNK_WIDTH / count;
 
     for (let slot = 0; slot < count; slot++) {
-      const spec = rng.weighted(SPECS, (candidate) => candidate.weight);
+      const spec = rng.weighted(specs, (candidate) => candidate.weight);
       const width = rng.range(spec.minWidth, spec.maxWidth);
       const half = width / 2;
 
@@ -235,19 +267,19 @@ export class ChunkField {
       });
     }
 
-    return { index, features, spawns: this.generateSpawns(start, rng) };
+    return { index, features, spawns: this.generateSpawns(start, rng, region.kind) };
   }
 
   /**
    * Places collectibles, decor and ledges.
    *
-   * No longer reads `features` at all: decor doesn't care what the terrain is doing
-   * underneath it (standing on a slope is exactly where a rock or a ruin would actually
-   * be), and only obstacle-as-hazard fairness ever needed to know where a launch landed.
-   * Drawing from the same chunk stream as everything else keeps the whole chunk
-   * reproducible regardless.
+   * Doesn't read `features`: decor doesn't care what the terrain is doing underneath
+   * it (standing on a slope is exactly where a rock or a ruin would actually be), and
+   * only obstacle-as-hazard fairness ever needed to know where a launch landed. Drawing
+   * from the same chunk stream as everything else keeps the whole chunk reproducible
+   * regardless.
    */
-  private generateSpawns(start: number, rng: Rng): SpawnSpec[] {
+  private generateSpawns(start: number, rng: Rng, regionKind: RegionKind): SpawnSpec[] {
     const spawns: SpawnSpec[] = [];
     let slot = 0;
 
@@ -275,13 +307,17 @@ export class ChunkField {
       const x = rng.range(start + 60, start + CHUNK_WIDTH - 60);
       if (placed.some((other) => Math.abs(other - x) < DECOR_SPACING)) continue;
       placed.push(x);
+      const variant =
+        regionKind === 'settlement'
+          ? rng.int(NATURAL_DECOR_VARIANTS, NATURAL_DECOR_VARIANTS + SETTLEMENT_DECOR_VARIANTS)
+          : rng.int(0, NATURAL_DECOR_VARIANTS);
       spawns.push({
         kind: 'decor',
         slot: slot++,
         x,
         width: rng.range(16, 30),
         height: rng.range(34, 64),
-        variant: rng.int(0, 3),
+        variant,
       });
     }
 

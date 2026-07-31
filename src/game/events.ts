@@ -19,10 +19,10 @@ export interface GameEvents extends Record<string, unknown> {
    * generative score consumes so that collecting is literally playing the music.
    */
   'chime:collect': { pitch: number; index: number; total: number };
-  /** A Shift is about to land — the telegraph window. `labels` name what's coming. */
-  'twist:telegraph': { labels: readonly string[] };
-  /** The telegraphed Shift has landed and is now the active set. */
-  'twist:shift': { ids: readonly string[]; shiftIndex: number };
+  /** Within sight of a region boundary — `name`/`law` describe what's on the other side. */
+  'region:approach': { name: string; law: readonly string[] };
+  /** Crossed into a new region; its law is now the active twist set. */
+  'region:enter': { name: string; law: readonly string[]; index: number };
   /** Run lifecycle. */
   'run:start': { seed: number };
 }

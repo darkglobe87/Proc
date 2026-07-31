@@ -17,6 +17,7 @@
 
 import type { Rng } from '../core/rng';
 import { ChunkField, type Feature, type SpawnSpec } from './chunks';
+import { RegionField, type Region } from './regions';
 
 /** One layer of the base dune curve. */
 interface Octave {
@@ -49,14 +50,17 @@ function smoothstep(t: number): number {
 export class Terrain {
   private readonly octaves: Octave[];
   private readonly chunks: ChunkField;
+  private readonly regions: RegionField;
 
   /**
    * @param baseline Screen-space y the dunes oscillate about. Set from the viewport
    *   so the horizon sits at a consistent fraction of the panel on any device.
+   * @param regionLengthOverride Development-only: see `RegionField`'s constructor.
    */
   constructor(
     rng: Rng,
     public baseline: number,
+    regionLengthOverride?: readonly [number, number],
   ) {
     const shapeRng = rng.fork('terrain');
     this.octaves = OCTAVE_SHAPE.map(({ amplitude, wavelength }) => {
@@ -64,7 +68,16 @@ export class Terrain {
       for (let i = 0; i < TABLE_SIZE; i++) table[i] = shapeRng.range(-1, 1);
       return { amplitude, wavelength, table };
     });
-    this.chunks = new ChunkField(rng);
+    // Built from the same top-level seed, independently of ChunkField: regions
+    // decide *what a chunk should contain* (decor style, feature bias), so they
+    // must exist before a chunk can consult them, not be derived from one.
+    this.regions = new RegionField(rng, regionLengthOverride);
+    this.chunks = new ChunkField(rng, this.regions);
+  }
+
+  /** The named biome containing world x — see `regions.ts`. */
+  regionAt(x: number): Region {
+    return this.regions.regionAt(x);
   }
 
   /** Ground y at world x. Smaller is higher. */

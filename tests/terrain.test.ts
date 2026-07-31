@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { Rng } from '../src/core/rng';
 import { Terrain } from '../src/world/terrain';
 import { CHUNK_WIDTH, ChunkField, chunkIndexAt } from '../src/world/chunks';
+import { RegionField } from '../src/world/regions';
 
 const BASELINE = 400;
 
 function terrain(seed = 12345): Terrain {
   return new Terrain(new Rng(seed), BASELINE);
+}
+
+/** A ChunkField with its own matching RegionField, for tests that exercise it directly. */
+function chunkField(seed: number): ChunkField {
+  return new ChunkField(new Rng(seed), new RegionField(new Rng(seed)));
 }
 
 /** Cheap order-sensitive digest of a float series. */
@@ -147,10 +153,10 @@ describe('ChunkField', () => {
   it('generates a chunk identically regardless of visit order', () => {
     // The property Rewind depends on: reaching a chunk from the right must produce
     // what reaching it from the left did.
-    const forward = new ChunkField(new Rng(64));
+    const forward = chunkField(64);
     for (let i = 0; i <= 6; i++) forward.chunk(i);
 
-    const backward = new ChunkField(new Rng(64));
+    const backward = chunkField(64);
     for (let i = 6; i >= 0; i--) backward.chunk(i);
 
     for (let i = 0; i <= 6; i++) {
@@ -159,7 +165,7 @@ describe('ChunkField', () => {
   });
 
   it('regenerates an evicted chunk identically', () => {
-    const field = new ChunkField(new Rng(3));
+    const field = chunkField(3);
     const original = structuredClone(field.chunk(5));
     field.prune(500_000);
     expect(field.chunk(5)).toEqual(original);
@@ -167,7 +173,7 @@ describe('ChunkField', () => {
 
   it('bounds resident chunks while scrolling', () => {
     // Without pruning this map grows for the whole run.
-    const field = new ChunkField(new Rng(7));
+    const field = chunkField(7);
     for (let x = 0; x < 200_000; x += 300) {
       field.featuresNear(x);
       field.prune(x);
@@ -178,7 +184,7 @@ describe('ChunkField', () => {
   it('keeps features inside their own chunk', () => {
     // Features must not straddle a chunk boundary, or the 3-chunk lookup window in
     // featuresNear could miss one and height would depend on where it was sampled.
-    const field = new ChunkField(new Rng(21));
+    const field = chunkField(21);
     for (let index = 1; index < 40; index++) {
       const chunk = field.chunk(index);
       for (const feature of chunk.features) {
@@ -190,7 +196,7 @@ describe('ChunkField', () => {
   });
 
   it('does not overlap features within a chunk', () => {
-    const field = new ChunkField(new Rng(88));
+    const field = chunkField(88);
     for (let index = 1; index < 60; index++) {
       const features = [...field.chunk(index).features].sort((a, b) => a.x - b.x);
       for (let i = 1; i < features.length; i++) {

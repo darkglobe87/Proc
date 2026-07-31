@@ -22,6 +22,7 @@ import * as storage from '../core/storage';
 import { Renderer } from '../render/renderer';
 import { SceneBuilder } from '../render/scene';
 import { SilhouetteStyle } from '../render/styles/silhouette';
+import { DUSK, lerpPalette, paletteById, type Palette } from '../render/palette';
 import { ANCHOR_X } from './camera';
 import { Camera } from './camera';
 import { World } from '../world/world';
@@ -29,7 +30,7 @@ import { CHIME_RADIUS, type Chime } from '../world/chimes';
 import { Player, PLAYER_RADIUS } from '../player/player';
 import { drawHud } from '../ui/hud';
 import type { GameEvents } from './events';
-import { TELEGRAPH_SECONDS, TwistScheduler, type SchedulerHooks } from '../twists/scheduler';
+import { RegionDirector, type DirectorHooks } from './director';
 import { createTwistRegistry } from '../twists/registry';
 
 export type GameState = 'ready' | 'exploring';
@@ -39,6 +40,12 @@ const PIXELS_PER_METRE = 10;
 /** Horizontal sample spacing when tessellating a dune band, in screen pixels. */
 const BAND_STEP = 12;
 const TRAIL_LENGTH = 18;
+/** How long a palette crossfade takes when crossing into a new region. */
+const PALETTE_CROSSFADE_SECONDS = 0.6;
+/** How long the "just entered" region name banner stays up before fading. */
+const REGION_BANNER_SECONDS = 3;
+/** Region lengths under `?fastshift` — see `RegionField`'s constructor. */
+const FAST_REGION_LENGTH: readonly [number, number] = [250, 450];
 
 interface BandSpec {
   role: 'terrainFar' | 'terrainMid' | 'terrainNear';
@@ -71,8 +78,14 @@ export interface GameOptions {
   seed: number;
   isDaily: boolean;
   showDiagnostics: boolean;
-  /** Development aid: compress Shift timing to a few seconds instead of 35–45s. */
+  /** Development aid: shrink every region to a couple hundred px instead of thousands. */
   fastShift?: boolean;
+}
+
+/** Stable pseudo-random 0..1 from an integer seed — deterministic per-instance jitter for decor. */
+function pseudoRandom(seed: number): number {
+  const s = Math.sin(seed) * 43758.5453;
+  return s - Math.floor(s);
 }
 
 export class Game {
@@ -86,9 +99,9 @@ export class Game {
   private readonly camera = new Camera();
   private readonly world: World;
   private readonly player: Player;
-  private readonly twists: TwistScheduler;
-  /** Reused every frame rather than allocated — see SchedulerHooks. */
-  private readonly twistHooks: SchedulerHooks;
+  private readonly director: RegionDirector;
+  /** Reused every frame rather than allocated — see DirectorHooks. */
+  private readonly directorHooks: DirectorHooks;
 
   private state: GameState = 'ready';
   private time = 0;
@@ -96,9 +109,15 @@ export class Game {
   private chimes = 0;
   private paused = false;
 
-  /** Telegraph banner state, driven by the 'twist:telegraph' event. */
-  private telegraphLabels: readonly string[] = [];
-  private telegraphTimer = 0;
+  /** Region banner: the name shown briefly on entering a new one, then faded. */
+  private bannerName = '';
+  private bannerTimer = 0;
+
+  /** Palette crossfade state, advanced against `this.time` rather than a per-frame dt. */
+  private paletteId = 'dusk';
+  private paletteFrom: Palette = DUSK;
+  private paletteTo: Palette = DUSK;
+  private paletteStartTime = 0;
 
   private readonly trail: number[] = [];
   private overBudgetSeconds = 0;
@@ -108,19 +127,15 @@ export class Game {
     private readonly options: GameOptions,
   ) {
     const rng = new Rng(options.seed);
-    this.world = new World(rng);
+    this.world = new World(rng, options.fastShift ? FAST_REGION_LENGTH : undefined);
     this.player = new Player(this.world);
     this.renderer = new Renderer(viewport, this.style);
 
     // Forking from the same top-level seed as World/Terrain, not consuming from them:
     // fork() never advances the parent stream, so this is independent of how many
     // chunks get generated and does not disturb their determinism either.
-    this.twists = new TwistScheduler(
-      rng.fork('twists'),
-      createTwistRegistry(rng),
-      options.fastShift ? { seconds: [3, 5], px: [200, 400] } : undefined,
-    );
-    this.twistHooks = {
+    this.director = new RegionDirector(createTwistRegistry(rng));
+    this.directorHooks = {
       world: this.world,
       player: this.player,
       bus: this.bus,
@@ -132,9 +147,9 @@ export class Game {
     this.input.attach(viewport.canvas);
     this.camera.snap();
 
-    this.bus.on('twist:telegraph', ({ labels }) => {
-      this.telegraphLabels = labels;
-      this.telegraphTimer = TELEGRAPH_SECONDS;
+    this.bus.on('region:enter', ({ name }) => {
+      this.bannerName = name;
+      this.bannerTimer = REGION_BANNER_SECONDS;
     });
 
     this.loop = new GameLoop({
@@ -168,13 +183,13 @@ export class Game {
     if (this.state === 'exploring') {
       // Computed before the physics step, so a region's laws are what the player's own
       // input and movement are actually evaluated against this frame.
-      const modifiers = this.twists.computePhysicsModifiers();
-      const effectiveInput = this.twists.transformInput(input, dt);
+      const modifiers = this.director.computePhysicsModifiers();
+      const effectiveInput = this.director.transformInput(input, dt);
       this.player.update(dt, effectiveInput, this.bus, modifiers);
 
       this.collectChimes();
-      this.twists.update(dt, this.twistHooks);
-      if (this.telegraphTimer > 0) this.telegraphTimer = Math.max(0, this.telegraphTimer - dt);
+      this.director.update(dt, this.directorHooks);
+      if (this.bannerTimer > 0) this.bannerTimer = Math.max(0, this.bannerTimer - dt);
 
       if (this.player.distance > this.furthest) {
         this.furthest = this.player.distance;
@@ -202,7 +217,7 @@ export class Game {
 
   /**
    * The real collection path for a single pickup. Exposed to twists via
-   * `SchedulerHooks.collectChime` so a twist that awards a chime on the player's
+   * `DirectorHooks.collectChime` so a twist that awards a chime on the player's
    * behalf (Echo's ghost) cannot silently diverge from how a live pickup is counted.
    */
   private collectOne(chime: Chime): void {
@@ -220,10 +235,11 @@ export class Game {
 
     // Applied to the camera every frame rather than by the twists directly: the camera
     // has no notion that twists exist, only fields a render fold happens to write to.
-    const renderMods = this.twists.computeRenderModifiers();
+    const renderMods = this.director.computeRenderModifiers();
     this.camera.rotation = renderMods.rotation;
     this.camera.mirrorX = renderMods.mirrorX;
 
+    this.updatePalette();
     this.builder.begin(this.camera, this.time);
 
     for (const band of BANDS) this.emitBand(band, width, height);
@@ -232,8 +248,9 @@ export class Game {
     this.emitChimes(width);
     this.emitTrail(drawX, drawY);
     this.emitPlayer(drawX, drawY);
-    this.twists.emit(this.builder);
+    this.director.emit(this.builder);
 
+    const approaching = this.director.approachingRegion;
     drawHud(
       this.builder,
       {
@@ -245,8 +262,9 @@ export class Game {
         isDaily: this.options.isDaily,
         state: this.state,
         chimes: this.chimes,
-        activeTwists: this.twists.activeLabels,
-        telegraphLabels: this.telegraphTimer > 0 ? this.telegraphLabels : [],
+        activeTwists: this.director.activeLabels,
+        bannerName: this.bannerTimer > 0 ? this.bannerName : '',
+        approachingName: approaching?.name ?? '',
         fps: this.loop.fps,
         frameMs: this.loop.frameMs,
         renderScale: this.viewport.renderScale,
@@ -260,6 +278,27 @@ export class Game {
 
     this.renderer.render(this.builder.scene);
     this.watchdog();
+  }
+
+  /**
+   * Starts (or continues) a crossfade to the current region's palette. Progress is
+   * measured against `this.time` rather than a per-frame dt — `render()` only receives
+   * an interpolation alpha, not a step size — so a crossfade that spans several frames
+   * still advances smoothly regardless of render cadence.
+   */
+  private updatePalette(): void {
+    const region = this.director.region;
+    if (region && region.paletteId !== this.paletteId) {
+      // Whatever is currently on screen, even mid-fade, is the new starting point —
+      // crossing two boundaries in quick succession blends onward rather than snapping.
+      this.paletteFrom = this.renderer.palette;
+      this.paletteTo = paletteById(region.paletteId);
+      this.paletteStartTime = this.time;
+      this.paletteId = region.paletteId;
+    }
+
+    const t = Math.min(1, (this.time - this.paletteStartTime) / PALETTE_CROSSFADE_SECONDS);
+    this.renderer.palette = t >= 1 ? this.paletteTo : lerpPalette(this.paletteFrom, this.paletteTo, t);
   }
 
   /** Visible world x range, accounting for the anchor and zoom. */
@@ -306,36 +345,157 @@ export class Game {
   }
 
   /**
-   * Decor — rocks, spires, ruined pillars — as dark masses with a rim-lit edge.
-   *
-   * The rim is not decoration on decoration: a silhouette-black shape standing on
-   * silhouette-black ground is invisible without it, regardless of whether touching it
-   * matters — Alto's gets away with pure silhouette only because its scenery breaks the
-   * horizon against the sky.
+   * Decor, dispatched to a distinct silhouette per variant so "rock" and "ruin" and
+   * "building" actually read as different things rather than one shape reused. Variants
+   * 0-3 are natural (chunks.ts only ever generates these outside a settlement); 4-5 are
+   * built, generated only inside one.
    */
   private emitDecor(width: number): void {
     const { left, right } = this.worldBounds(width);
     for (const decor of this.world.decorNear(this.camera.x, (right - left) / 2 + 200)) {
       if (decor.x < left - 40 || decor.x > right + 40) continue;
 
-      const half = decor.width / 2;
-      const top = decor.y - decor.height;
-      // Slight taper, so a monolith reads as stone rather than as a rectangle.
-      const taper = half * 0.35;
-
-      this.builder.polygon('rock', 'entities');
-      this.builder.point(decor.x - half, decor.y);
-      this.builder.point(decor.x - half + taper, top);
-      this.builder.point(decor.x + half - taper, top);
-      this.builder.point(decor.x + half, decor.y);
-      this.builder.end();
-
-      // Lit edge on the sun side (the sun sits to the right in the sky cache).
-      this.builder.polyline('accent', 'entities', 2, 0.8);
-      this.builder.point(decor.x + half - taper, top);
-      this.builder.point(decor.x + half, decor.y);
-      this.builder.end();
+      switch (decor.variant) {
+        case 0:
+          this.emitBoulder(decor.x, decor.y, decor.width, decor.height, decor.id);
+          break;
+        case 1:
+          this.emitSpire(decor.x, decor.y, decor.width, decor.height);
+          break;
+        case 2:
+          this.emitRuin(decor.x, decor.y, decor.width, decor.height, decor.id);
+          break;
+        case 3:
+          this.emitCluster(decor.x, decor.y, decor.width, decor.height, decor.id);
+          break;
+        case 4:
+          this.emitHut(decor.x, decor.y, decor.width, decor.height);
+          break;
+        default:
+          this.emitTower(decor.x, decor.y, decor.width, decor.height, decor.id);
+          break;
+      }
     }
+  }
+
+  /** A rounded, slightly irregular boulder — one lump, jittered per instance. */
+  private emitBoulder(cx: number, cy: number, width: number, height: number, seed: number): void {
+    const halfW = width / 2;
+    const h = height * 0.55;
+    const j = (i: number): number => (pseudoRandom(seed * 13 + i) - 0.5) * 0.3;
+
+    this.builder.polygon('rock', 'entities');
+    this.builder.point(cx - halfW, cy);
+    this.builder.point(cx + (-0.85 + j(0)) * halfW, cy + (-0.4 + j(1)) * h * 2);
+    this.builder.point(cx + (-0.4 + j(2)) * halfW, cy + (-1 + j(3)) * h);
+    this.builder.point(cx + (0.3 + j(4)) * halfW, cy + (-1 + j(5)) * h);
+    this.builder.point(cx + (0.85 + j(6)) * halfW, cy + (-0.4 + j(7)) * h * 2);
+    this.builder.point(cx + halfW, cy);
+    this.builder.end();
+
+    this.builder.polyline('accent', 'entities', 2, 0.7);
+    this.builder.point(cx + (-0.4 + j(2)) * halfW, cy + (-1 + j(3)) * h);
+    this.builder.point(cx + (0.3 + j(4)) * halfW, cy + (-1 + j(5)) * h);
+    this.builder.end();
+  }
+
+  /** A tall, narrow, tapered spire — the original decor shape. */
+  private emitSpire(cx: number, cy: number, width: number, height: number): void {
+    const half = width / 2;
+    const top = cy - height;
+    const taper = half * 0.35;
+
+    this.builder.polygon('rock', 'entities');
+    this.builder.point(cx - half, cy);
+    this.builder.point(cx - half + taper, top);
+    this.builder.point(cx + half - taper, top);
+    this.builder.point(cx + half, cy);
+    this.builder.end();
+
+    this.builder.polyline('accent', 'entities', 2, 0.8);
+    this.builder.point(cx + half - taper, top);
+    this.builder.point(cx + half, cy);
+    this.builder.end();
+  }
+
+  /** A rectangular block with an irregular, broken top — jagged, not clean-edged. */
+  private emitRuin(cx: number, cy: number, width: number, height: number, seed: number): void {
+    const half = width / 2;
+    const baseTop = cy - height * 0.7;
+    const teeth = 4;
+    const j = (i: number): number => pseudoRandom(seed * 31 + i) * height * 0.35;
+
+    this.builder.polygon('rock', 'entities');
+    this.builder.point(cx - half, cy);
+    this.builder.point(cx - half, baseTop);
+    for (let i = 0; i <= teeth; i++) {
+      const x = cx - half + (width * i) / teeth;
+      this.builder.point(x, baseTop - j(i));
+    }
+    this.builder.point(cx + half, cy);
+    this.builder.end();
+  }
+
+  /** Two or three small overlapping stones — reuses the boulder shape at a smaller scale. */
+  private emitCluster(cx: number, cy: number, width: number, height: number, seed: number): void {
+    const stones = 2 + Math.floor(pseudoRandom(seed) * 2); // 2 or 3
+    for (let i = 0; i < stones; i++) {
+      const spread = width * 0.35;
+      const dx = (pseudoRandom(seed * 7 + i) - 0.5) * 2 * spread;
+      const scale = 0.5 + pseudoRandom(seed * 11 + i) * 0.35;
+      this.emitBoulder(cx + dx, cy, width * scale, height * scale, seed + i * 97);
+    }
+  }
+
+  /** A small hut: a box wall with an overhanging triangular roof. */
+  private emitHut(cx: number, cy: number, width: number, height: number): void {
+    const half = width / 2;
+    const wallH = height * 0.55;
+    const roofH = height * 0.5;
+    const overhang = half * 1.2;
+    const wallTop = cy - wallH;
+
+    this.builder.polygon('rock', 'entities');
+    this.builder.point(cx - half, cy);
+    this.builder.point(cx - half, wallTop);
+    this.builder.point(cx - overhang, wallTop);
+    this.builder.point(cx, wallTop - roofH);
+    this.builder.point(cx + overhang, wallTop);
+    this.builder.point(cx + half, wallTop);
+    this.builder.point(cx + half, cy);
+    this.builder.end();
+
+    this.builder.polyline('accent', 'entities', 2, 0.85);
+    this.builder.point(cx - overhang, wallTop);
+    this.builder.point(cx, wallTop - roofH);
+    this.builder.point(cx + overhang, wallTop);
+    this.builder.end();
+  }
+
+  /** A tall tower with a peaked cap and a single lit window. */
+  private emitTower(cx: number, cy: number, width: number, height: number, seed: number): void {
+    const half = width / 2;
+    const bodyH = height * 0.85;
+    const capH = height * 0.3;
+    const bodyTop = cy - bodyH;
+
+    this.builder.polygon('rock', 'entities');
+    this.builder.point(cx - half, cy);
+    this.builder.point(cx - half, bodyTop);
+    this.builder.point(cx, bodyTop - capH);
+    this.builder.point(cx + half, bodyTop);
+    this.builder.point(cx + half, cy);
+    this.builder.end();
+
+    this.builder.polyline('accent', 'entities', 2, 0.85);
+    this.builder.point(cx - half, bodyTop);
+    this.builder.point(cx, bodyTop - capH);
+    this.builder.point(cx + half, bodyTop);
+    this.builder.end();
+
+    // A lantern glow, offset so it doesn't sit dead-centre on every tower.
+    const windowY = cy - bodyH * (0.35 + pseudoRandom(seed) * 0.3);
+    this.builder.disc('accent', 'entities', cx, windowY, 2.4, 0.9);
   }
 
   /**

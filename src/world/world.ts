@@ -16,6 +16,7 @@ import type { Rng } from '../core/rng';
 import { Terrain } from './terrain';
 import { MAX_SPAWN_REACH, chunkIndexAt, type SpawnSpec } from './chunks';
 import type { Chime } from './chimes';
+import type { Region } from './regions';
 import { resolveDecor, type Decor } from './decor';
 import { resolveLedge, type Solid } from './solids';
 
@@ -39,13 +40,19 @@ export class World {
   private readonly decorScratch: Decor[] = [];
   private readonly solidScratch: Solid[] = [];
 
-  constructor(rng: Rng) {
-    this.terrain = new Terrain(rng, 0);
+  /** @param regionLengthOverride Development-only: see `RegionField`'s constructor. */
+  constructor(rng: Rng, regionLengthOverride?: readonly [number, number]) {
+    this.terrain = new Terrain(rng, 0, regionLengthOverride);
   }
 
   /** Clears per-run state. Terrain and spawn specs are seed-derived and unaffected. */
   reset(): void {
     this.collected.clear();
+  }
+
+  /** The named biome containing world x — see `regions.ts`. */
+  regionAt(x: number): Region {
+    return this.terrain.regionAt(x);
   }
 
   get collectedCount(): number {

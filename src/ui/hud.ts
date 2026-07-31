@@ -16,10 +16,12 @@ export interface HudModel {
   isDaily: boolean;
   state: 'ready' | 'exploring';
   chimes: number;
-  /** Currently active twist labels, shown persistently — a twist must be readable at a glance. */
+  /** Currently active twist labels, shown persistently — a law must be readable at a glance. */
   activeTwists: readonly string[];
-  /** Non-empty only during the telegraph window ahead of a Shift landing. */
-  telegraphLabels: readonly string[];
+  /** Non-empty for a few seconds right after crossing into a new region. */
+  bannerName: string;
+  /** Non-empty while a region boundary is within sight, in the direction faced. */
+  approachingName: string;
   /** Diagnostics, shown only when enabled. */
   fps: number;
   frameMs: number;
@@ -61,8 +63,8 @@ export function drawHud(
     500,
   );
 
-  // Active twist(s), persistent for as long as they're in effect. The fairness contract
-  // requires every twist be readable from the screen alone — this is that label.
+  // Active twist(s), persistent for as long as they're in effect — the region's own
+  // law, readable from the screen alone the moment you're standing in it.
   if (model.activeTwists.length > 0) {
     builder.text(
       'accent',
@@ -80,17 +82,21 @@ export function drawHud(
     builder.text('chime', 'hud', width / 2, top, `◈ ${model.chimes}`, 18, 'center', 600);
   }
 
-  // The telegraph banner: the one advance warning a Shift gives before it lands.
-  if (model.telegraphLabels.length > 0) {
+  // The region banner: shown briefly on arrival, the one advance warning otherwise —
+  // "you are here" beats "you were here a moment ago" for a name that never repeats
+  // on a timer, so the banner wins over the fainter approach line when both are true.
+  if (model.bannerName) {
+    builder.text('text', 'hud', width / 2, top + 24, model.bannerName.toUpperCase(), 18, 'center', 700);
+  } else if (model.approachingName) {
     builder.text(
-      'text',
+      'textDim',
       'hud',
       width / 2,
       top + 24,
-      model.telegraphLabels.join(' + ').toUpperCase(),
-      18,
+      `approaching ${model.approachingName}`.toUpperCase(),
+      13,
       'center',
-      700,
+      600,
     );
   }
 
