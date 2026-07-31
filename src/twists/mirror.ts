@@ -1,13 +1,12 @@
 /**
  * Mirror — the world runs right-to-left, and your own controls follow it.
  *
- * A literal "run backwards through the world" was considered and rejected: obstacle
- * fairness (no hazard in a ramp's landing zone, minimum spacing) is only proven for
- * left-to-right travel, and re-deriving it symmetrically for the reverse direction
- * is a second fairness system, not a twist. Flipping the *rendering* horizontally
- * instead is free of that risk — collision and placement are all completely
- * unaffected — while still being disorienting: everything you see runs the opposite
- * way to how it has for the rest of the exploration.
+ * A literal "run backwards through the world" was considered and rejected: chunk
+ * generation, ledges and every future landmark are authored assuming x only ever
+ * grows, and reversing that for one twist is a second world model, not a twist.
+ * Flipping the *rendering* horizontally instead is free of that risk — placement is
+ * completely unaffected — while still being disorienting: everything you see runs the
+ * opposite way to how it has for the rest of the exploration.
  *
  * Now that movement is the player's own choice rather than an auto-cruise, Mirror has
  * a much better version of the joke available than the old trick-spin reversal: it

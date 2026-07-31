@@ -1,14 +1,12 @@
 /**
  * The Shift scheduler — the centrepiece of the design.
  *
- * A state machine with three concerns, kept deliberately separate:
+ * A state machine with two concerns, kept deliberately separate:
  *
  *  1. **When** the next Shift happens: a distance/time race (whichever comes
  *     first), each rerolled per cycle from the scheduler's own RNG stream.
  *  2. **What** it changes: a telegraph window so the change is never a surprise
  *     the player couldn't see coming, then a swap of the active twist set.
- *  3. **Fairness immediately after**: a grace window with hazards hidden, so the
- *     first thing a new rule does is never kill someone who hasn't read it yet.
  *
  * Twists themselves are folded fresh every frame (see `types.ts`) — the scheduler
  * only decides *which* twists are in the active set, never mutates game state
@@ -27,8 +25,6 @@ import type { Chime } from '../world/chimes';
 
 /** Warning before a Shift actually applies. Long enough to read, short enough to bite. */
 export const TELEGRAPH_SECONDS = 1.5;
-/** Hazards are hidden for this long after a Shift lands. */
-export const GRACE_SECONDS = 1.2;
 
 const MIN_SHIFT_SECONDS = 35;
 const MAX_SHIFT_SECONDS = 45;
@@ -38,17 +34,6 @@ const MAX_SHIFT_PX = 6000;
 
 /** The Shift number (1-indexed) at which the active set becomes a pair instead of one. */
 const PAIR_FROM_SHIFT = 6;
-
-/**
- * How far ahead of the player's *current* position to keep hazards hidden during
- * the grace window. Recomputed every frame from wherever the player actually is, so
- * correctness never depends on guessing how far they will travel — only on staying
- * a little ahead of `HAZARD_REACH` (player.ts) each frame.
- */
-const GRACE_LOOKAHEAD = 260;
-const GRACE_TRAILING_MARGIN = 200;
-/** This scheduler's own key into World's suppression map — see World for why keyed. */
-const GRACE_SUPPRESSION_KEY = 'twist-grace';
 
 export interface SchedulerHooks {
   world: World;
@@ -73,9 +58,6 @@ export class TwistScheduler {
   private thresholdSeconds = 0;
   private thresholdPx = 0;
   private telegraphElapsed = 0;
-
-  private graceActive = false;
-  private graceElapsed = 0;
 
   constructor(
     private readonly rng: Rng,
@@ -104,8 +86,6 @@ export class TwistScheduler {
     this.timeSinceTrigger = 0;
     this.distanceOrigin = 0;
     this.telegraphElapsed = 0;
-    this.graceActive = false;
-    this.graceElapsed = 0;
     this.refillPool();
     this.rerollThresholds();
   }
@@ -159,25 +139,11 @@ export class TwistScheduler {
   }
 
   /**
-   * Advances everything time-based: active twists' own per-frame upkeep, the
-   * grace window, and the wait/telegraph/commit cycle.
+   * Advances everything time-based: active twists' own per-frame upkeep, and the
+   * wait/telegraph/commit cycle.
    */
   update(dt: number, hooks: SchedulerHooks): void {
     for (const twist of this.active) twist.update?.(dt);
-
-    if (this.graceActive) {
-      this.graceElapsed += dt;
-      if (this.graceElapsed >= GRACE_SECONDS) {
-        hooks.world.clearHazardSuppression(GRACE_SUPPRESSION_KEY);
-        this.graceActive = false;
-      } else {
-        hooks.world.suppressHazards(
-          GRACE_SUPPRESSION_KEY,
-          hooks.player.x - GRACE_TRAILING_MARGIN,
-          hooks.player.x + GRACE_LOOKAHEAD,
-        );
-      }
-    }
 
     if (this.phase === 'waiting') {
       this.timeSinceTrigger += dt;
@@ -219,14 +185,6 @@ export class TwistScheduler {
     this.timeSinceTrigger = 0;
     this.distanceOrigin = hooks.player.distance;
     this.rerollThresholds();
-
-    this.graceActive = true;
-    this.graceElapsed = 0;
-    hooks.world.suppressHazards(
-      GRACE_SUPPRESSION_KEY,
-      hooks.player.x - GRACE_TRAILING_MARGIN,
-      hooks.player.x + GRACE_LOOKAHEAD,
-    );
 
     hooks.bus.emit('twist:shift', {
       ids: this.active.map((twist) => twist.id),

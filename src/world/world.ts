@@ -16,12 +16,12 @@ import type { Rng } from '../core/rng';
 import { Terrain } from './terrain';
 import { MAX_SPAWN_REACH, chunkIndexAt, type SpawnSpec } from './chunks';
 import type { Chime } from './chimes';
-import { resolveObstacle, type Obstacle } from './obstacles';
+import { resolveDecor, type Decor } from './decor';
 import { resolveLedge, type Solid } from './solids';
 
 interface ResolvedChunk {
   chimes: Chime[];
-  obstacles: Obstacle[];
+  decor: Decor[];
   solids: Solid[];
 }
 
@@ -36,48 +36,16 @@ export class World {
 
   /** Reused scratch arrays; queries run every frame and must not allocate. */
   private readonly chimeScratch: Chime[] = [];
-  private readonly obstacleScratch: Obstacle[] = [];
+  private readonly decorScratch: Decor[] = [];
   private readonly solidScratch: Solid[] = [];
 
   constructor(rng: Rng) {
     this.terrain = new Terrain(rng, 0);
   }
 
-  /**
-   * Named ranges in which hazards are hidden.
-   *
-   * Keyed rather than a single slot, because two callers need suppression
-   * independently and neither should be able to clear the other's: the twist
-   * scheduler's grace corridor turns its own entry on at every Shift and off again
-   * ~1.2s later, while the `?nohazards` dev flag sets a permanent, run-long entry once.
-   * A single shared slot would have the grace window's teardown wipe out the dev
-   * flag's suppression the first time any Shift landed — which is exactly what
-   * happened before this was keyed. Lives here rather than in twist code so obstacles
-   * never need to know twists exist.
-   */
-  private readonly suppressions = new Map<string, { from: number; to: number }>();
-
   /** Clears per-run state. Terrain and spawn specs are seed-derived and unaffected. */
   reset(): void {
     this.collected.clear();
-    this.suppressions.clear();
-  }
-
-  /** Hides hazards between two x positions, under `key`. Replaces that key's own range. */
-  suppressHazards(key: string, fromX: number, toX: number): void {
-    this.suppressions.set(key, { from: fromX, to: toX });
-  }
-
-  /** Clears only this key's suppression; other keys are unaffected. */
-  clearHazardSuppression(key: string): void {
-    this.suppressions.delete(key);
-  }
-
-  private isSuppressed(x: number): boolean {
-    for (const range of this.suppressions.values()) {
-      if (x >= range.from && x <= range.to) return true;
-    }
-    return false;
   }
 
   get collectedCount(): number {
@@ -110,17 +78,16 @@ export class World {
     return this.chimeScratch;
   }
 
-  /** Obstacles within a window. Returns a reused array — iterate immediately. */
-  obstaclesNear(x: number, reach = MAX_SPAWN_REACH): readonly Obstacle[] {
-    this.obstacleScratch.length = 0;
+  /** Decor within a window. Returns a reused array — iterate immediately. */
+  decorNear(x: number, reach = MAX_SPAWN_REACH): readonly Decor[] {
+    this.decorScratch.length = 0;
     for (const chunk of this.chunksSpanning(x, reach)) {
-      for (const obstacle of chunk.obstacles) {
-        if (obstacle.x < x - reach || obstacle.x > x + reach) continue;
-        if (this.isSuppressed(obstacle.x)) continue;
-        this.obstacleScratch.push(obstacle);
+      for (const decor of chunk.decor) {
+        if (decor.x < x - reach || decor.x > x + reach) continue;
+        this.decorScratch.push(decor);
       }
     }
-    return this.obstacleScratch;
+    return this.decorScratch;
   }
 
   /** Solids overlapping a window. Returns a reused array — iterate immediately. */
@@ -163,7 +130,7 @@ export class World {
 
     // Specs owned by this chunk, regardless of where their anchor landed. Neighbours are
     // resolved in their own turn.
-    const resolved: ResolvedChunk = { chimes: [], obstacles: [], solids: [] };
+    const resolved: ResolvedChunk = { chimes: [], decor: [], solids: [] };
     for (const spec of this.terrain.chunkSpawns(index)) {
       this.resolveInto(resolved, spec, index);
     }
@@ -179,13 +146,9 @@ export class World {
         // which the platformer pivot removed (see player.ts). Re-derived in a later
         // milestone against real player-controlled movement — see the pivot plan.
         break;
-      case 'obstacle': {
-        // Rejected on uphill ground — see resolveObstacle. Not every spec becomes
-        // an entity, the same as a ledge with nowhere sensible to sit.
-        const obstacle = resolveObstacle(this.terrain, spec, index);
-        if (obstacle) target.obstacles.push(obstacle);
+      case 'decor':
+        target.decor.push(resolveDecor(this.terrain, spec, index));
         break;
-      }
       case 'ledge':
         target.solids.push(resolveLedge(this.terrain, spec, index));
         break;

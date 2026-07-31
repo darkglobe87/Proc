@@ -24,7 +24,7 @@ export interface Feature {
 }
 
 /*
- * Placements for everything that is not terrain: collectibles, hazards, ledges.
+ * Placements for everything that is not terrain: collectibles, decor, ledges.
  *
  * These are *specs*, carrying no y coordinate. Resolving them into world positions needs
  * ground height, but `Terrain` owns this module — so the spec/resolve split keeps the
@@ -51,8 +51,9 @@ export interface ChimeArcSpec {
   count: number;
 }
 
-export interface ObstacleSpec {
-  kind: 'obstacle';
+/** A decorative silhouette — a rock, a spire, a ruined pillar. Purely scenery. */
+export interface DecorSpec {
+  kind: 'decor';
   slot: number;
   x: number;
   width: number;
@@ -75,7 +76,7 @@ export interface LedgeSpec {
   thickness: number;
 }
 
-export type SpawnSpec = ChimeArcSpec | ObstacleSpec | LedgeSpec;
+export type SpawnSpec = ChimeArcSpec | DecorSpec | LedgeSpec;
 
 export interface Chunk {
   index: number;
@@ -95,17 +96,8 @@ const MAX_FEATURE_WIDTH = 460;
  */
 export const MAX_SPAWN_REACH = 700;
 
-/**
- * Clear ground after a ramp where no obstacle may stand.
- *
- * A ramp always launches the player (its trailing face guarantees it), so anything
- * inside the landing zone would be a hazard they were airborne over and could not
- * avoid. Fairness has to be built into generation; it cannot be recovered later.
- */
-const RAMP_LANDING_CLEAR = 460;
-
-/** Minimum gap between obstacles, so a successful dodge is not instantly punished. */
-const OBSTACLE_SPACING = 260;
+/** Minimum gap between decor pieces, so a chunk doesn't read as one cluttered pile. */
+const DECOR_SPACING = 200;
 
 /** Chunks before this are left flat so a run always opens calmly. */
 const CALM_CHUNKS = 1;
@@ -243,29 +235,21 @@ export class ChunkField {
       });
     }
 
-    return { index, features, spawns: this.generateSpawns(start, features, rng) };
+    return { index, features, spawns: this.generateSpawns(start, rng) };
   }
 
   /**
-   * Places collectibles, hazards and rails.
+   * Places collectibles, decor and ledges.
    *
-   * Runs after features and reads them, because placement is *about* the terrain: chime
-   * arcs want to start where a launch happens, and obstacles must stay out of where a
-   * launch lands. Drawing from the same chunk stream keeps the whole chunk reproducible.
+   * No longer reads `features` at all: decor doesn't care what the terrain is doing
+   * underneath it (standing on a slope is exactly where a rock or a ruin would actually
+   * be), and only obstacle-as-hazard fairness ever needed to know where a launch landed.
+   * Drawing from the same chunk stream as everything else keeps the whole chunk
+   * reproducible regardless.
    */
-  private generateSpawns(start: number, features: readonly Feature[], rng: Rng): SpawnSpec[] {
+  private generateSpawns(start: number, rng: Rng): SpawnSpec[] {
     const spawns: SpawnSpec[] = [];
     let slot = 0;
-
-    // Ground that a launch will carry the player over. Nothing hazardous may go here.
-    const launchZones: Array<{ from: number; to: number }> = [];
-    for (const feature of features) {
-      if (feature.kind !== 'ramp' && feature.kind !== 'crest') continue;
-      const trailingEdge = feature.x + feature.width / 2;
-      launchZones.push({ from: feature.x, to: trailingEdge + RAMP_LANDING_CLEAR });
-    }
-    const inLaunchZone = (x: number): boolean =>
-      launchZones.some((zone) => x > zone.from && x < zone.to);
 
     // Arc *hints*, spread across the chunk. Only a hint: `arcLaunch` picks the real launch
     // point at resolution time, since it is the only place that can see the terrain — and it
@@ -282,18 +266,17 @@ export class ChunkField {
       });
     }
 
-    // At most one per chunk. Contact is fatal and the only recourse is a jump, so roughly
-    // one hazard every 900–1800px is already a decision every few seconds — and Milestone 4's
-    // twists will be adding pressure on top of this, not instead of it.
-    const obstacleCount = rng.int(0, 2);
+    // At least one piece of scenery per chunk, so the world reads as lived-in rather
+    // than empty between the occasional feature — there is no fairness budget to spend
+    // now that nothing here is dangerous.
+    const decorCount = rng.int(1, 4);
     const placed: number[] = [];
-    for (let attempt = 0; attempt < obstacleCount * 4 && placed.length < obstacleCount; attempt++) {
+    for (let attempt = 0; attempt < decorCount * 4 && placed.length < decorCount; attempt++) {
       const x = rng.range(start + 60, start + CHUNK_WIDTH - 60);
-      if (inLaunchZone(x)) continue;
-      if (placed.some((other) => Math.abs(other - x) < OBSTACLE_SPACING)) continue;
+      if (placed.some((other) => Math.abs(other - x) < DECOR_SPACING)) continue;
       placed.push(x);
       spawns.push({
-        kind: 'obstacle',
+        kind: 'decor',
         slot: slot++,
         x,
         width: rng.range(16, 30),

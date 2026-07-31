@@ -27,7 +27,8 @@ export const DUSK: Palette = {
     terrainNear: '#120c20',
     player: '#f6e7c8',
     trail: '#ff9c6b',
-    hazard: '#2a0f1a',
+    // Muted stone, not warning-red — decor now, not danger.
+    rock: '#241c30',
     chime: '#ffd9a0',
     accent: '#ff9c6b',
     sun: '#ffd9a0',

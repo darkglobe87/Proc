@@ -2,7 +2,7 @@
  * The seam between the game and the screen.
  *
  * Game code never touches a canvas. Instead it describes each frame as a list of
- * primitives tagged with a **semantic role** — `player`, `hazard`, `terrainNear` —
+ * primitives tagged with a **semantic role** — `player`, `rock`, `terrainNear` —
  * and a `RenderStyle` decides what a role looks like. That indirection is what makes
  * the render-style twists affordable: silhouette, pixel, wireframe, papercraft and
  * ASCII all consume an unchanged scene, so a style swap costs one assignment rather
@@ -19,7 +19,7 @@ export type Role =
   | 'terrainNear'
   | 'player'
   | 'trail'
-  | 'hazard'
+  | 'rock'
   | 'chime'
   | 'accent'
   | 'sun'

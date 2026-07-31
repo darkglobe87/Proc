@@ -15,11 +15,6 @@ export interface GameEvents extends Record<string, unknown> {
   /** Touched down on the ground or a ledge. */
   'player:land': { x: number; y: number };
   /**
-   * Hazard contact. Never run-ending — see `Player.hurt` — this is the moment a
-   * respawn-to-last-safe-ground happens, for camera shake, a sound, a screen flash.
-   */
-  'player:hurt': { x: number; y: number };
-  /**
    * A chime was taken. `pitch` is a scale degree rising along its arc — the hook the
    * generative score consumes so that collecting is literally playing the music.
    */

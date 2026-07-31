@@ -8,14 +8,16 @@
  *  2. Jumping forgives near-misses on both ends: coyote time for stepping off an edge
  *     a beat late, a jump buffer for pressing a beat early. Neither is a "trick", they
  *     are what makes precise-looking platforming *feel* precise rather than picky.
- *  3. Contact with a hazard costs you a moment and some ground, never the world you
- *     were exploring. There is no permadeath here — see `hurt` below.
+ *
+ * There is nothing in the world that can hurt or kill the player — this is an
+ * exploration game, not a runner with the serial numbers filed off, and a wrong step
+ * costing progress fights that. Ground-standing silhouettes are scenery (see
+ * `world/decor.ts`), not hazards.
  */
 
 import type { InputSnapshot } from '../core/input';
 import type { Terrain } from '../world/terrain';
 import type { World } from '../world/world';
-import { hitsObstacle } from '../world/obstacles';
 import { groundFollowAt, resolveHorizontal, sweepVertical } from '../world/solids';
 import type { GameBus } from '../game/events';
 
@@ -45,19 +47,16 @@ const AIR_ACCEL = 1100;
 const COYOTE_SECONDS = 0.1;
 const JUMP_BUFFER_SECONDS = 0.12;
 
-/** How far a hazard hit knocks the camera/body lean, purely cosmetic. */
+/** Peak cosmetic lean toward the direction of travel. */
 const LEAN_MAX = (10 * Math.PI) / 180;
 const LEAN_EASE = 10;
 
-/** Seconds of invulnerability (and a visible fade) after being hurt. */
-const HURT_SECONDS = 1;
-
 export const PLAYER_RADIUS = 9;
-/** Half-width and full height of the collision box used for solids and hazards. */
+/** Half-width and full height of the collision box used for solids. */
 const BODY_HALF_WIDTH = 9;
 const BODY_HEIGHT = 30;
-/** How far ahead to look for hazards. */
-const HAZARD_REACH = 90;
+/** How far ahead to look for solids each step. */
+const SOLID_REACH = 90;
 
 /**
  * The continuous knobs a twist may bend, owned here rather than by the twist system:
@@ -101,12 +100,6 @@ export class Player {
   /** Furthest x ever reached, for camera look-ahead and a soft "furthest" stat. */
   distance = 0;
 
-  /** Seconds remaining of post-hazard invulnerability; also drives a visible fade. */
-  hurtTimer = 0;
-  /** Last position that was grounded and not itself hurting — where a hazard sends you back to. */
-  private lastSafeX = 0;
-  private lastSafeY = 0;
-
   private coyoteTimer = 0;
   private jumpBufferTimer = 0;
 
@@ -120,17 +113,10 @@ export class Player {
   constructor(private readonly world: World) {
     this.y = this.terrain.heightAt(0);
     this.previousY = this.y;
-    this.lastSafeX = 0;
-    this.lastSafeY = this.y;
   }
 
   private get terrain(): Terrain {
     return this.world.terrain;
-  }
-
-  /** True while hurt-invulnerable — flickers on screen, ignores further hazard contact. */
-  get isHurt(): boolean {
-    return this.hurtTimer > 0;
   }
 
   reset(): void {
@@ -144,9 +130,6 @@ export class Player {
     this.facing = 1;
     this.rotation = 0;
     this.distance = 0;
-    this.hurtTimer = 0;
-    this.lastSafeX = 0;
-    this.lastSafeY = this.y;
     this.coyoteTimer = 0;
     this.jumpBufferTimer = 0;
   }
@@ -161,8 +144,6 @@ export class Player {
     this.previousY = this.y;
     this.mods = modifiers;
 
-    if (this.hurtTimer > 0) this.hurtTimer = Math.max(0, this.hurtTimer - dt);
-
     if (input.jumpPressed) this.jumpBufferTimer = JUMP_BUFFER_SECONDS;
     else if (this.jumpBufferTimer > 0) this.jumpBufferTimer -= dt;
 
@@ -173,23 +154,12 @@ export class Player {
     }
 
     this.easeLean(dt, input);
-
-    // Checked before recording "safe ground": a hit this frame has already teleported
-    // x/y back to the *previous* safe spot and started the invulnerability window, so
-    // skipping the record here is what stops that teleport from immediately overwriting
-    // the very position it just rewound to.
-    this.checkHazards(bus);
-    if (this.grounded && this.hurtTimer <= 0) {
-      this.lastSafeX = this.x;
-      this.lastSafeY = this.y;
-    }
-
     this.distance = Math.max(this.distance, this.x);
   }
 
   /** Solids overlapping a generous window around the player, for both axes' resolution. */
   private nearbySolids(): ReturnType<World['solidsNear']> {
-    return this.world.solidsNear(this.x, HAZARD_REACH * 2);
+    return this.world.solidsNear(this.x, SOLID_REACH * 2);
   }
 
   private updateGrounded(dt: number, input: Readonly<InputSnapshot>, bus: GameBus): void {
@@ -293,32 +263,5 @@ export class Player {
   private easeLean(dt: number, input: Readonly<InputSnapshot>): void {
     const target = clamp(input.moveAxis, -1, 1) * LEAN_MAX * (this.grounded ? 1 : 0.6);
     this.rotation += (target - this.rotation) * Math.min(1, LEAN_EASE * dt);
-  }
-
-  /**
-   * Hazard contact. Unlike the runner this never ends anything: it knocks the player
-   * back to the last safe ground with a brief invulnerability window, via `player:hurt`
-   * rather than a run-ending `player:crash`. Skipped entirely while already hurt, so a
-   * respawn cannot itself immediately re-trigger from standing near another hazard.
-   */
-  private checkHazards(bus: GameBus): void {
-    if (this.hurtTimer > 0) return;
-    const bodyY = this.y - BODY_HEIGHT / 2;
-    for (const obstacle of this.world.obstaclesNear(this.x, HAZARD_REACH)) {
-      if (hitsObstacle(obstacle, this.x, bodyY, PLAYER_RADIUS + 2)) {
-        this.hurt(bus);
-        return;
-      }
-    }
-  }
-
-  private hurt(bus: GameBus): void {
-    bus.emit('player:hurt', { x: this.x, y: this.y });
-    this.x = this.lastSafeX;
-    this.y = this.lastSafeY;
-    this.vx = 0;
-    this.vy = 0;
-    this.grounded = true;
-    this.hurtTimer = HURT_SECONDS;
   }
 }

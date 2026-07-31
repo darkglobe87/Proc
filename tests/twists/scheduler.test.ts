@@ -4,12 +4,7 @@ import { Rng } from '../../src/core/rng';
 import { World } from '../../src/world/world';
 import { Player } from '../../src/player/player';
 import type { GameEvents } from '../../src/game/events';
-import {
-  GRACE_SECONDS,
-  TELEGRAPH_SECONDS,
-  TwistScheduler,
-  type SchedulerHooks,
-} from '../../src/twists/scheduler';
+import { TELEGRAPH_SECONDS, TwistScheduler, type SchedulerHooks } from '../../src/twists/scheduler';
 import type { Twist, TwistId } from '../../src/twists/types';
 
 const DT = 1 / 60;
@@ -201,21 +196,6 @@ describe('TwistScheduler', () => {
     // Whichever twist landed first is deactivated before the second activates.
     expect(log[1]).toBe('a:deactivate');
     expect(log[2]).toBe('b:activate');
-  });
-
-  it('suppresses hazards for the grace window after a Shift, then clears it', () => {
-    const { hooks } = makeHooks(9);
-    const scheduler = new TwistScheduler(new Rng(8), [stub('inversion', 'Inversion')]);
-
-    advance(scheduler, hooks, 46 + TELEGRAPH_SECONDS + 0.1);
-    // Immediately after commit, obstacles anywhere near the player must be hidden.
-    expect(hooks.world.obstaclesNear(hooks.player.x, 4000).length).toBe(0);
-
-    advance(scheduler, hooks, GRACE_SECONDS + 0.1);
-    // Once the grace window has fully elapsed, suppression is lifted again.
-    const before = hooks.world.obstaclesNear(hooks.player.x, 4000).length;
-    hooks.world.clearHazardSuppression('twist-grace'); // no-op if already cleared; confirms idempotence
-    expect(hooks.world.obstaclesNear(hooks.player.x, 4000).length).toBe(before);
   });
 
   it('is deterministic: same seed produces the same shift sequence', () => {

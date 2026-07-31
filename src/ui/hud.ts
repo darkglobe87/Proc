@@ -16,8 +16,6 @@ export interface HudModel {
   isDaily: boolean;
   state: 'ready' | 'exploring';
   chimes: number;
-  /** True right after a hazard hit, while the player is briefly invulnerable. */
-  hurt: boolean;
   /** Currently active twist labels, shown persistently — a twist must be readable at a glance. */
   activeTwists: readonly string[];
   /** Non-empty only during the telegraph window ahead of a Shift landing. */
@@ -94,10 +92,6 @@ export function drawHud(
       'center',
       700,
     );
-  }
-
-  if (model.hurt) {
-    builder.text('hazard', 'hud', width / 2, height * 0.3, 'OUCH', 22, 'center', 700, 0.85);
   }
 
   if (model.showDiagnostics) {

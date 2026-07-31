@@ -10,21 +10,17 @@ function resolveOptions(): {
   seed: number;
   isDaily: boolean;
   showDiagnostics: boolean;
-  noHazards: boolean;
   fastShift: boolean;
 } {
   const params = new URLSearchParams(window.location.search);
   const showDiagnostics = params.has('debug');
-  // Development aid: lets a long stretch of world be inspected without dodging. The twist
-  // and render-style work in later milestones will want the same kind of switch.
-  const noHazards = params.has('nohazards');
   // Development aid: Shifts normally land every 35-45s, which is fine to play but far too
   // slow to iterate against — this compresses the interval to a few seconds so every
   // twist can be seen without waiting a run out for real.
   const fastShift = params.has('fastshift');
 
   if (params.has('daily')) {
-    return { seed: dailySeed(), isDaily: true, showDiagnostics, noHazards, fastShift };
+    return { seed: dailySeed(), isDaily: true, showDiagnostics, fastShift };
   }
 
   const requested = params.get('seed');
@@ -33,11 +29,11 @@ function resolveOptions(): {
     // An out-of-range or malformed code falls back to a random run rather than
     // refusing to start.
     if (decoded !== null) {
-      return { seed: decoded, isDaily: false, showDiagnostics, noHazards, fastShift };
+      return { seed: decoded, isDaily: false, showDiagnostics, fastShift };
     }
   }
 
-  return { seed: randomSeed(), isDaily: false, showDiagnostics, noHazards, fastShift };
+  return { seed: randomSeed(), isDaily: false, showDiagnostics, fastShift };
 }
 
 const canvas = document.getElementById('stage');

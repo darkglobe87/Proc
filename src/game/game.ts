@@ -71,8 +71,6 @@ export interface GameOptions {
   seed: number;
   isDaily: boolean;
   showDiagnostics: boolean;
-  /** Development aid: hide all hazards so the world can be inspected without dodging. */
-  noHazards?: boolean;
   /** Development aid: compress Shift timing to a few seconds instead of 35–45s. */
   fastShift?: boolean;
 }
@@ -138,8 +136,6 @@ export class Game {
       this.telegraphLabels = labels;
       this.telegraphTimer = TELEGRAPH_SECONDS;
     });
-
-    if (this.options.noHazards) this.world.suppressHazards('dev-nohazards', -Infinity, Infinity);
 
     this.loop = new GameLoop({
       update: (dt) => this.update(dt),
@@ -232,7 +228,7 @@ export class Game {
 
     for (const band of BANDS) this.emitBand(band, width, height);
     this.emitSolids(width);
-    this.emitObstacles(width);
+    this.emitDecor(width);
     this.emitChimes(width);
     this.emitTrail(drawX, drawY);
     this.emitPlayer(drawX, drawY);
@@ -249,7 +245,6 @@ export class Game {
         isDaily: this.options.isDaily,
         state: this.state,
         chimes: this.chimes,
-        hurt: this.player.isHurt,
         activeTwists: this.twists.activeLabels,
         telegraphLabels: this.telegraphTimer > 0 ? this.telegraphLabels : [],
         fps: this.loop.fps,
@@ -311,33 +306,34 @@ export class Game {
   }
 
   /**
-   * Obstacles as dark masses with a rim-lit edge.
+   * Decor — rocks, spires, ruined pillars — as dark masses with a rim-lit edge.
    *
-   * The rim is not decoration. A silhouette-black obstacle standing on silhouette-black
-   * ground is invisible, and an unreadable hazard is an unfair one — Alto's gets away with
-   * pure silhouette only because its obstacles break the horizon against the sky.
+   * The rim is not decoration on decoration: a silhouette-black shape standing on
+   * silhouette-black ground is invisible without it, regardless of whether touching it
+   * matters — Alto's gets away with pure silhouette only because its scenery breaks the
+   * horizon against the sky.
    */
-  private emitObstacles(width: number): void {
+  private emitDecor(width: number): void {
     const { left, right } = this.worldBounds(width);
-    for (const obstacle of this.world.obstaclesNear(this.camera.x, (right - left) / 2 + 200)) {
-      if (obstacle.x < left - 40 || obstacle.x > right + 40) continue;
+    for (const decor of this.world.decorNear(this.camera.x, (right - left) / 2 + 200)) {
+      if (decor.x < left - 40 || decor.x > right + 40) continue;
 
-      const half = obstacle.width / 2;
-      const top = obstacle.y - obstacle.height;
+      const half = decor.width / 2;
+      const top = decor.y - decor.height;
       // Slight taper, so a monolith reads as stone rather than as a rectangle.
       const taper = half * 0.35;
 
-      this.builder.polygon('hazard', 'entities');
-      this.builder.point(obstacle.x - half, obstacle.y);
-      this.builder.point(obstacle.x - half + taper, top);
-      this.builder.point(obstacle.x + half - taper, top);
-      this.builder.point(obstacle.x + half, obstacle.y);
+      this.builder.polygon('rock', 'entities');
+      this.builder.point(decor.x - half, decor.y);
+      this.builder.point(decor.x - half + taper, top);
+      this.builder.point(decor.x + half - taper, top);
+      this.builder.point(decor.x + half, decor.y);
       this.builder.end();
 
       // Lit edge on the sun side (the sun sits to the right in the sky cache).
       this.builder.polyline('accent', 'entities', 2, 0.8);
-      this.builder.point(obstacle.x + half - taper, top);
-      this.builder.point(obstacle.x + half, obstacle.y);
+      this.builder.point(decor.x + half - taper, top);
+      this.builder.point(decor.x + half, decor.y);
       this.builder.end();
     }
   }
@@ -356,7 +352,7 @@ export class Game {
 
       for (const t of [0.18, 0.82]) {
         const sx = solidLeft + solid.width * t;
-        this.builder.polyline('hazard', 'entities', 3, 0.6);
+        this.builder.polyline('accent', 'entities', 3, 0.6);
         this.builder.point(sx, solid.y);
         this.builder.point(sx, this.world.terrain.heightAt(sx));
         this.builder.end();
@@ -403,7 +399,6 @@ export class Game {
     const rotation = this.player.rotation;
     const cos = Math.cos(rotation);
     const sin = Math.sin(rotation);
-    const alpha = this.player.isHurt && Math.floor(this.time * 10) % 2 === 0 ? 0.35 : 1;
 
     const halfWidth = 9;
     const bodyHeight = 30;
@@ -415,7 +410,7 @@ export class Game {
       [-halfWidth, 0],
     ];
 
-    this.builder.polygon('player', 'entities', alpha);
+    this.builder.polygon('player', 'entities');
     for (const [lx, ly] of corners) {
       this.builder.point(x + lx * cos - ly * sin, y + lx * sin + ly * cos);
     }
@@ -428,7 +423,6 @@ export class Game {
       x - headLocalY * sin,
       y + headLocalY * cos,
       PLAYER_RADIUS,
-      alpha,
     );
 
     const noseLocalX = this.player.facing * (halfWidth + 5);
@@ -439,7 +433,6 @@ export class Game {
       x + noseLocalX * cos - noseLocalY * sin,
       y + noseLocalX * sin + noseLocalY * cos,
       3,
-      alpha,
     );
   }
 
