@@ -91,12 +91,20 @@ export interface CameraView {
    * Radians. Non-zero under Slow Rotate, and set to π by Inversion.
    *
    * Applied as a whole-frame post-process by the render style (see
-   * `renderer.ts`'s `applyScreenRotation`), never as part of the world-space camera
+   * `renderer.ts`'s `applyScreenTransform`), never as part of the world-space camera
    * transform — rotating world geometry directly breaks the moment any shape is
    * drawn asymmetrically relative to the camera, which the terrain fill always is.
    */
   rotation: number;
-  /** Horizontal mirror of world-space rendering. Set by the Mirror twist. */
+  /**
+   * Horizontal mirror of the whole rendered frame. Set by the Mirror twist.
+   *
+   * Also applied as a whole-frame post-process, not folded into the world-space
+   * camera transform — the camera anchor sits off-centre (`ANCHOR_X`, so the runner
+   * has room ahead to see what's coming), and mirroring around an off-centre point
+   * shifts the visible world sideways rather than just flipping it, leaving one edge
+   * of the screen with nothing drawn on it. See `applyScreenTransform`.
+   */
   mirrorX: boolean;
 }
 

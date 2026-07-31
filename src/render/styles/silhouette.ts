@@ -6,7 +6,7 @@
  * four styles in Milestone 5 are reinterpreting.
  */
 
-import { applyCamera, applyScreenRotation, type RenderStyle, type StyleContext } from '../renderer';
+import { applyCamera, applyScreenTransform, type RenderStyle, type StyleContext } from '../renderer';
 import { LAYER_ORDER, type LayerId, type Prim, type Scene } from '../scene';
 import { SkyCache } from '../sky';
 
@@ -25,12 +25,12 @@ export class SilhouetteStyle implements RenderStyle {
   draw(scene: Scene, { ctx, viewport, palette }: StyleContext): void {
     const { width, height } = viewport;
 
-    // Sky and world share one outer rotation (Inversion's whole-frame roll), so they
-    // move as a single rigid image with no seam between them — see
-    // applyScreenRotation for why this cannot be folded into the camera transform
-    // below instead.
+    // Sky and world share one outer roll/mirror (Inversion and Mirror's whole-frame
+    // post-process), so they move as a single rigid image with no seam or sideways
+    // shift between them — see applyScreenTransform for why this cannot be folded
+    // into the camera transform below instead.
     ctx.save();
-    applyScreenRotation(ctx, scene.camera, width, height);
+    applyScreenTransform(ctx, scene.camera, width, height);
 
     this.sky.draw(ctx, width, height, palette);
 

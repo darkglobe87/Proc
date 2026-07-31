@@ -31,9 +31,9 @@ export interface RenderStyle {
  * appears at the viewport anchor, so the runner keeps a consistent screen position
  * regardless of zoom.
  *
- * Deliberately excludes `rotation` — see {@link applyScreenRotation} for why that
- * one component of the camera has to be applied separately, as a whole-frame
- * post-process rather than a world-space transform.
+ * Deliberately excludes `rotation` *and* `mirrorX` — see {@link applyScreenTransform}
+ * for why both have to be applied separately, as a whole-frame post-process rather
+ * than folded into this world-space transform.
  */
 export function applyCamera(
   ctx: CanvasRenderingContext2D,
@@ -42,42 +42,53 @@ export function applyCamera(
   height: number,
 ): void {
   ctx.translate(width * ANCHOR_X, height * ANCHOR_Y);
-  const mirror = camera.mirrorX ? -1 : 1;
-  if (camera.zoom !== 1 || mirror !== 1) ctx.scale(camera.zoom * mirror, camera.zoom);
+  if (camera.zoom !== 1) ctx.scale(camera.zoom, camera.zoom);
   ctx.translate(-camera.x, -camera.y);
 }
 
 /**
- * Rolls the *entire rendered frame* around the viewport centre — sky and world alike.
+ * Rolls and/or mirrors the *entire rendered frame* around the viewport centre — sky
+ * and world alike.
  *
- * This is not folded into {@link applyCamera} on purpose. Several world shapes are
- * deliberately drawn asymmetrically: the terrain fill, for one, extends far past the
- * bottom edge so it reads as solid ground, with no matching extension above (there
- * has never been a reason to draw ground above the sky). Rotating that geometry in
- * world-space swaps top and bottom and exposes the asymmetry directly: a gap opens
- * where the fill never reached, and the oversized part sweeps into the sky instead —
- * which is exactly the bug this function replaces. Rotating the *already-composited*
- * frame has no such assumption to violate: whatever was drawn, however far any single
- * shape extends, rotates as one rigid image with no seams.
+ * Neither is folded into {@link applyCamera} on purpose, and for related reasons.
+ * Rotation breaks in world-space because several shapes are deliberately drawn
+ * asymmetrically — the terrain fill extends far past the bottom edge so it reads as
+ * solid ground, with no matching extension above — so rotating that geometry swaps
+ * top and bottom and exposes the asymmetry as a gap where the fill never reached.
  *
- * Callers wrap sky *and* world drawing inside this rotation and leave the HUD outside
- * it, for the same reason the HUD ignores camera translation and zoom: it must stay
- * legible regardless of what a twist is doing to the world.
+ * Mirroring breaks for a different but related reason: the camera anchor sits at
+ * `ANCHOR_X` (32% across), not screen centre, because the runner needs room ahead to
+ * see what's coming. Folding a horizontal flip into that same off-centre transform
+ * doesn't just mirror the view, it *shifts* it sideways — a world range that exactly
+ * covered the screen when drawn normally lands mostly off to one side once mirrored
+ * around a point that isn't the centre, leaving the screen's other edge with nothing
+ * drawn on it at all. That is the exact "split screen" Mirror produced before this
+ * was moved out of `applyCamera`.
+ *
+ * Applying both as a post-process on the *already-composited* frame sidesteps both
+ * problems at once: whatever was drawn, however far any shape extends and wherever
+ * the camera anchor sits, a whole-frame transform around the viewport centre moves
+ * it as one rigid image with no seam and no shift.
+ *
+ * Callers wrap sky *and* world drawing inside this and leave the HUD outside it, for
+ * the same reason the HUD ignores camera translation and zoom: it must stay legible
+ * regardless of what a twist is doing to the world.
  */
-export function applyScreenRotation(
+export function applyScreenTransform(
   ctx: CanvasRenderingContext2D,
   camera: CameraView,
   width: number,
   height: number,
 ): void {
-  if (camera.rotation === 0) return;
+  if (camera.rotation === 0 && !camera.mirrorX) return;
   ctx.translate(width / 2, height / 2);
-  ctx.rotate(camera.rotation);
+  if (camera.rotation !== 0) ctx.rotate(camera.rotation);
+  if (camera.mirrorX) ctx.scale(-1, 1);
   ctx.translate(-width / 2, -height / 2);
 }
 
 /**
- * Inverse of {@link applyCamera} plus {@link applyScreenRotation} together, for
+ * Inverse of {@link applyCamera} plus {@link applyScreenTransform} together, for
  * hit-testing world positions from screen taps.
  */
 export function screenToWorld(
@@ -87,7 +98,7 @@ export function screenToWorld(
   screenX: number,
   screenY: number,
 ): { x: number; y: number } {
-  // Undo the whole-frame roll first, since it was the outermost transform applied.
+  // Undo the whole-frame roll/mirror first, since it was the outermost transform.
   let sx = screenX - width / 2;
   let sy = screenY - height / 2;
   if (camera.rotation !== 0) {
@@ -97,13 +108,13 @@ export function screenToWorld(
     sy = sx * sin + sy * cos;
     sx = rx;
   }
+  if (camera.mirrorX) sx = -sx;
   sx += width / 2;
   sy += height / 2;
 
   const dx = sx - width * ANCHOR_X;
   const dy = sy - height * ANCHOR_Y;
-  const mirror = camera.mirrorX ? -1 : 1;
-  return { x: camera.x + dx / (camera.zoom * mirror), y: camera.y + dy / camera.zoom };
+  return { x: camera.x + dx / camera.zoom, y: camera.y + dy / camera.zoom };
 }
 
 export class Renderer {
