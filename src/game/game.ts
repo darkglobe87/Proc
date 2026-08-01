@@ -27,6 +27,8 @@ import { ANCHOR_X } from './camera';
 import { Camera } from './camera';
 import { World } from '../world/world';
 import { CHIME_RADIUS, type Chime } from '../world/chimes';
+import type { Landmark } from '../world/landmarks';
+import { FRAGMENTS, fragmentById, npcById } from '../world/lore';
 import { Player, PLAYER_RADIUS } from '../player/player';
 import { drawHud } from '../ui/hud';
 import type { GameEvents } from './events';
@@ -46,6 +48,14 @@ const PALETTE_CROSSFADE_SECONDS = 0.6;
 const REGION_BANNER_SECONDS = 3;
 /** Region lengths under `?fastshift` — see `RegionField`'s constructor. */
 const FAST_REGION_LENGTH: readonly [number, number] = [250, 450];
+/** How close the player must stand to a landmark for interact to reach it. */
+const INTERACT_REACH = 70;
+/** How long a revealed line of dialogue or a fragment's text stays on screen. */
+const SPEECH_SECONDS = 4.5;
+/** The tail of SPEECH_SECONDS spent fading out rather than snapping off. */
+const SPEECH_FADE_SECONDS = 0.6;
+/** Storage key for the cross-run fragment journal — deliberately not per-seed. */
+const JOURNAL_STORAGE_KEY = 'journal.fragments';
 
 interface BandSpec {
   role: 'terrainFar' | 'terrainMid' | 'terrainNear';
@@ -119,6 +129,20 @@ export class Game {
   private paletteTo: Palette = DUSK;
   private paletteStartTime = 0;
 
+  /** The nearest landmark within interact range this frame, if any. */
+  private nearLandmark: Landmark | null = null;
+  /** Which line an NPC says next, keyed by the landmark's region index — cycles per visit. */
+  private readonly npcLineIndex = new Map<number, number>();
+  /** Fragment ids ever found, persisted across runs — the journal. */
+  private readonly journal: Set<string>;
+
+  /** A revealed line of dialogue or fragment text, anchored above where it was found. */
+  private speechTitle = '';
+  private speechText = '';
+  private speechTimer = 0;
+  private speechX = 0;
+  private speechY = 0;
+
   private readonly trail: number[] = [];
   private overBudgetSeconds = 0;
 
@@ -143,6 +167,7 @@ export class Game {
     };
 
     this.furthest = storage.load<number>('furthest.distance', 0);
+    this.journal = new Set(storage.load<string[]>(JOURNAL_STORAGE_KEY, []));
 
     this.input.attach(viewport.canvas);
     this.camera.snap();
@@ -188,8 +213,10 @@ export class Game {
       this.player.update(dt, effectiveInput, this.bus, modifiers);
 
       this.collectChimes();
+      this.updateLandmarks(input.interactPressed);
       this.director.update(dt, this.directorHooks);
       if (this.bannerTimer > 0) this.bannerTimer = Math.max(0, this.bannerTimer - dt);
+      if (this.speechTimer > 0) this.speechTimer = Math.max(0, this.speechTimer - dt);
 
       if (this.player.distance > this.furthest) {
         this.furthest = this.player.distance;
@@ -226,6 +253,50 @@ export class Game {
     this.bus.emit('chime:collect', { pitch: chime.pitch, index: chime.index, total: chime.total });
   }
 
+  /**
+   * Finds the nearest landmark in interact range (for the HUD prompt) and, on an
+   * interact press, triggers it. Unlike chimes, a landmark is never auto-collected
+   * by proximity alone — talking to someone or reading something is a deliberate
+   * choice, not something that happens to you by walking past it.
+   */
+  private updateLandmarks(interactPressed: boolean): void {
+    let closest: Landmark | null = null;
+    let closestDistance = Infinity;
+    for (const landmark of this.world.landmarksNear(this.player.x, INTERACT_REACH * 3)) {
+      const distance = Math.abs(landmark.x - this.player.x);
+      if (distance > INTERACT_REACH || distance >= closestDistance) continue;
+      closest = landmark;
+      closestDistance = distance;
+    }
+    this.nearLandmark = closest;
+    if (closest && interactPressed) this.triggerLandmark(closest);
+  }
+
+  private triggerLandmark(landmark: Landmark): void {
+    if (landmark.kind === 'npc') {
+      const npc = npcById(landmark.contentId);
+      const line = this.npcLineIndex.get(landmark.regionIndex) ?? 0;
+      this.npcLineIndex.set(landmark.regionIndex, (line + 1) % npc.lines.length);
+      this.showSpeech(npc.name, npc.lines[line % npc.lines.length] as string, landmark);
+      return;
+    }
+
+    const fragment = fragmentById(landmark.contentId);
+    if (!this.journal.has(fragment.id)) {
+      this.journal.add(fragment.id);
+      storage.save(JOURNAL_STORAGE_KEY, [...this.journal]);
+    }
+    this.showSpeech(fragment.title, fragment.lines.join('\n'), landmark);
+  }
+
+  private showSpeech(title: string, text: string, at: Landmark): void {
+    this.speechTitle = title;
+    this.speechText = text;
+    this.speechTimer = SPEECH_SECONDS;
+    this.speechX = at.x;
+    this.speechY = at.y;
+  }
+
   private render(alpha: number): void {
     const { width, height } = this.viewport;
 
@@ -245,12 +316,18 @@ export class Game {
     for (const band of BANDS) this.emitBand(band, width, height);
     this.emitSolids(width);
     this.emitDecor(width);
+    this.emitLandmarks(width);
     this.emitChimes(width);
     this.emitTrail(drawX, drawY);
     this.emitPlayer(drawX, drawY);
     this.director.emit(this.builder);
+    // Suppressed while paused: the journal overlay already covers whatever was just
+    // revealed, and drawing both at once is just two texts fighting for the same
+    // screen space.
+    if (!this.paused) this.emitSpeech();
 
     const approaching = this.director.approachingRegion;
+    const showInteractPrompt = this.nearLandmark !== null && this.speechTimer <= 0;
     drawHud(
       this.builder,
       {
@@ -265,6 +342,15 @@ export class Game {
         activeTwists: this.director.activeLabels,
         bannerName: this.bannerTimer > 0 ? this.bannerName : '',
         approachingName: approaching?.name ?? '',
+        interactPrompt: showInteractPrompt
+          ? this.nearLandmark?.kind === 'npc'
+            ? 'talk'
+            : 'read'
+          : '',
+        fragmentsFound: this.journal.size,
+        fragmentsTotal: FRAGMENTS.length,
+        paused: this.paused,
+        journalTitles: [...this.journal].map((id) => fragmentById(id).title),
         fps: this.loop.fps,
         frameMs: this.loop.frameMs,
         renderScale: this.viewport.renderScale,
@@ -496,6 +582,96 @@ export class Game {
     // A lantern glow, offset so it doesn't sit dead-centre on every tower.
     const windowY = cy - bodyH * (0.35 + pseudoRandom(seed) * 0.3);
     this.builder.disc('accent', 'entities', cx, windowY, 2.4, 0.9);
+  }
+
+  /** NPCs and fragments — the one authored thing per region. See `world/landmarks.ts`. */
+  private emitLandmarks(width: number): void {
+    const { left, right } = this.worldBounds(width);
+    for (const landmark of this.world.landmarksNear(this.camera.x, (right - left) / 2 + 200)) {
+      if (landmark.x < left - 40 || landmark.x > right + 40) continue;
+      if (landmark.kind === 'npc') this.emitNpc(landmark.x, landmark.y);
+      else this.emitFragmentMarker(landmark.x, landmark.y, landmark.regionIndex);
+    }
+  }
+
+  /**
+   * A robed, standing silhouette — built from the same shapes as decor (so it reads
+   * as belonging to the same world) but flared at the hem rather than tapered, so it
+   * never gets mistaken for a spire, plus a soft pulsing marker above the head as the
+   * one deliberate tell that this figure, unlike a rock, is worth walking up to.
+   */
+  private emitNpc(cx: number, cy: number): void {
+    const halfW = 10;
+    const bodyH = 34;
+    const flare = 5;
+
+    this.builder.polygon('rock', 'entities');
+    this.builder.point(cx - halfW - flare, cy);
+    this.builder.point(cx - halfW, cy - bodyH * 0.72);
+    this.builder.point(cx - halfW * 0.55, cy - bodyH);
+    this.builder.point(cx + halfW * 0.55, cy - bodyH);
+    this.builder.point(cx + halfW, cy - bodyH * 0.72);
+    this.builder.point(cx + halfW + flare, cy);
+    this.builder.end();
+
+    this.builder.disc('rock', 'entities', cx, cy - bodyH - 8, 8);
+
+    const pulse = 1 + Math.sin(this.time * 3) * 0.25;
+    this.builder.disc('accent', 'entities', cx, cy - bodyH - 26, 3 * pulse, 0.85);
+  }
+
+  /** A small waystone with a pulsing core — something found, not something standing. */
+  private emitFragmentMarker(cx: number, cy: number, seed: number): void {
+    const halfW = 7;
+    const h = 26;
+
+    this.builder.polygon('rock', 'entities');
+    this.builder.point(cx - halfW, cy);
+    this.builder.point(cx - halfW, cy - h * 0.7);
+    this.builder.point(cx, cy - h);
+    this.builder.point(cx + halfW, cy - h * 0.7);
+    this.builder.point(cx + halfW, cy);
+    this.builder.end();
+
+    const pulse = 1 + Math.sin(this.time * 2.4 + seed) * 0.3;
+    this.builder.disc('chime', 'entities', cx, cy - h * 0.55, 3 * pulse, 0.9);
+  }
+
+  /**
+   * A revealed line of dialogue or fragment text, floating above where it was found.
+   * World-anchored (not HUD), so it scrolls, mirrors and rotates with everything else
+   * exactly the way the landmark it belongs to does.
+   */
+  private emitSpeech(): void {
+    if (this.speechTimer <= 0) return;
+    const alpha = Math.min(1, this.speechTimer / SPEECH_FADE_SECONDS);
+    const baseY = this.speechY - 66;
+
+    this.builder.text(
+      'text',
+      'entities',
+      this.speechX,
+      baseY - 18,
+      this.speechTitle.toUpperCase(),
+      13,
+      'center',
+      700,
+      alpha,
+    );
+    const lines = this.speechText.split('\n');
+    lines.forEach((line, i) => {
+      this.builder.text(
+        'textDim',
+        'entities',
+        this.speechX,
+        baseY + i * 16,
+        line,
+        13,
+        'center',
+        500,
+        alpha,
+      );
+    });
   }
 
   /**

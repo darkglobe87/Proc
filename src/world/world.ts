@@ -19,6 +19,7 @@ import type { Chime } from './chimes';
 import type { Region } from './regions';
 import { resolveDecor, type Decor } from './decor';
 import { resolveLedge, type Solid } from './solids';
+import { LandmarkField, resolveLandmark, type Landmark } from './landmarks';
 
 interface ResolvedChunk {
   chimes: Chime[];
@@ -31,6 +32,7 @@ const KEEP_RADIUS = 3;
 
 export class World {
   readonly terrain: Terrain;
+  private readonly landmarkField: LandmarkField;
 
   private readonly resolved = new Map<number, ResolvedChunk>();
   private readonly collected = new Set<number>();
@@ -39,10 +41,14 @@ export class World {
   private readonly chimeScratch: Chime[] = [];
   private readonly decorScratch: Decor[] = [];
   private readonly solidScratch: Solid[] = [];
+  private readonly landmarkScratch: Landmark[] = [];
 
   /** @param regionLengthOverride Development-only: see `RegionField`'s constructor. */
   constructor(rng: Rng, regionLengthOverride?: readonly [number, number]) {
     this.terrain = new Terrain(rng, 0, regionLengthOverride);
+    // Forked, not shared: landmark placement must not shift if chunk or decor
+    // generation ever consumes a different number of draws from the parent stream.
+    this.landmarkField = new LandmarkField(rng.fork('landmarks'));
   }
 
   /** Clears per-run state. Terrain and spawn specs are seed-derived and unaffected. */
@@ -107,6 +113,28 @@ export class World {
       }
     }
     return this.solidScratch;
+  }
+
+  /**
+   * Landmarks within a window. Returns a reused array — iterate immediately.
+   *
+   * Walks regions rather than chunks: a landmark is one-per-region, not one-per-chunk,
+   * so there is nothing chunk-shaped to cache here. Regions are contiguous and each
+   * knows its own `to`, so stepping `regionAt(region.to)` walks forward one region at
+   * a time without needing the field to expose "region by index" separately.
+   */
+  landmarksNear(x: number, reach = MAX_SPAWN_REACH): readonly Landmark[] {
+    this.landmarkScratch.length = 0;
+    let region = this.terrain.regionAt(x - reach);
+    for (;;) {
+      const spec = this.landmarkField.landmarkForRegion(region);
+      if (spec && spec.x >= x - reach && spec.x <= x + reach) {
+        this.landmarkScratch.push(resolveLandmark(this.terrain, spec));
+      }
+      if (region.to > x + reach) break;
+      region = this.terrain.regionAt(region.to);
+    }
+    return this.landmarkScratch;
   }
 
   /** Drops distant resolved chunks and prunes the terrain's own cache. */
